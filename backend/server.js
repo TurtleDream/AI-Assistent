@@ -11,7 +11,82 @@ const app = express();
 app.use(cors()); // разрешаем запросы с dev-сервера Angular (localhost:4200)
 app.use(express.json());
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+/* ------------------------------------------------------------------ *
+ *  Конфигурация LLM (in-memory).
+ *  Значения можно задать в .env (fallback) ИЛИ через POST /api/config
+ *  (поля задаются в интерфейсе).
+ * ------------------------------------------------------------------ */
+const LLM_DEFAULTS = {
+  // Провайдер: 'openai' (и OpenAI-совместимые) или 'yandex' (YandexGPT)
+  provider: process.env.LLM_PROVIDER || 'openai',
+  // Провайдер / OpenAI-совместимый baseURL (для openai-провайдеров)
+  baseURL: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
+  // Ключ API (в памяти; может быть передан из UI)
+  apiKey: process.env.OPENAI_API_KEY || '',
+  // Chat-модель для ответов
+  chatModel: process.env.OPENAI_CHAT_MODEL || 'gpt-4o-mini',
+  // Embedding-модель для индексации и запросов
+  embeddingModel: process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small',
+  // Обязателен для YandexGPT (входит в modelUri и x-folder-id)
+  yandexFolderId: process.env.YANDEX_FOLDER_ID || ''
+};
+
+const YANDEX_BASE = 'https://llm.api.cloud.yandex.net';
+const YANDEX_PROVIDERS = ['yandex'];
+
+// ВАЖНО: локальный ввод ключа может понадобиться даже если в .env пусто.
+const llmConfig = { ...LLM_DEFAULTS };
+
+function getLLMConfig() {
+  return { ...llmConfig };
+}
+
+// Создаём клиент под текущую конфигурацию (поддержка OpenAI-совместимых API).
+function createClient() {
+  return new OpenAI({
+    apiKey: llmConfig.apiKey || 'no-key',
+    baseURL: llmConfig.baseURL || undefined
+  });
+}
+
+// Кэш последнего созданного клиента, чтобы не плодить инстансы.
+let client = null;
+function getClient() {
+  if (!client) client = createClient();
+  return client;
+}
+function resetClient() {
+  client = null;
+}
+
+/* ------------------------------------------------------------------ *
+ *  Известные модели (для подсказок в UI).
+ *  Можно ввести произвольную свою.
+ * ------------------------------------------------------------------ */
+const KNOWN_CHAT_MODELS = [
+  'gpt-4o-mini',
+  'gpt-4o',
+  'gpt-4',
+  'gpt-3.5-turbo',
+  'o1-mini',
+  'o1',
+  'gpt-4.1-mini',
+  'gpt-4.1',
+  'deepseek-chat',
+  'deepseek-reasoner',
+  'claude-3-5-sonnet',
+  'claude-3-5-haiku'
+];
+
+const KNOWN_EMBEDDING_MODELS = [
+  'text-embedding-3-small',
+  'text-embedding-3-large',
+  'text-embedding-ada-002'
+];
+
+// Модели YandexGPT (подсказки для UI, можно ввести свою)
+const YANDEX_CHAT_MODELS = ['yandexgpt-lite', 'yandexgpt', 'yandexgpt-pro', 'yandexgpt-32k'];
+const YANDEX_EMBEDDING_MODELS = ['text-search-doc', 'text-search-query'];
 
 /* ------------------------------------------------------------------ *
  *  Глобальное in-memory хранилище векторов.
@@ -82,14 +157,113 @@ function cosineSimilarity(a, b) {
 }
 
 /* ------------------------------------------------------------------ *
- *  Эмбеддинги батчами
+ *  YandexGPT адаптер (свой формат foundationModels/v1, НЕ OpenAI).
+ *  Авторизация: Authorization: Api-Key <ключ> + заголовок x-folder-id.
+ * ------------------------------------------------------------------ */
+function yandexHeaders() {
+  const headers = {
+    'Content-Type': 'application/json',
+    Authorization: `Api-Key ${llmConfig.apiKey || ''}`
+  };
+  if (llmConfig.yandexFolderId) headers['x-folder-id'] = llmConfig.yandexFolderId;
+  return headers;
+}
+
+function yandexBase() {
+  return (llmConfig.baseURL && llmConfig.provider === 'yandex'
+    ? llmConfig.baseURL
+    : YANDEX_BASE
+  ).replace(/\/+$/, '');
+}
+
+function yandexChatUri() {
+  return `gpt://${llmConfig.yandexFolderId || '${folder}'}/${llmConfig.chatModel}/latest`;
+}
+function yandexEmbedUri() {
+  return `emb://${llmConfig.yandexFolderId || '${folder}'}/${llmConfig.embeddingModel}/latest`;
+}
+
+async function yandexHttpError(res) {
+  let text = '';
+  try {
+    text = await res.text();
+  } catch {
+    text = '';
+  }
+  throw new Error(`YandexGPT API error ${res.status}: ${text.slice(0, 500)}`);
+}
+
+// Эмбеддинг одного текста через Yandex textEmbedding
+async function yandexEmbedOne(text) {
+  const res = await fetch(`${yandexBase()}/foundationModels/v1/textEmbedding`, {
+    method: 'POST',
+    headers: yandexHeaders(),
+    body: JSON.stringify({ modelUri: yandexEmbedUri(), text })
+  });
+  if (!res.ok) await yandexHttpError(res);
+  const data = await res.json();
+  if (!Array.isArray(data.embedding)) throw new Error('YandexGPT: нет поля embedding в ответе');
+  return data.embedding;
+}
+
+// Ответ от YandexGPT (chat complete)
+async function yandexChat(systemPrompt, userPrompt) {
+  const res = await fetch(`${yandexBase()}/foundationModels/v1/completion`, {
+    method: 'POST',
+    headers: yandexHeaders(),
+    body: JSON.stringify({
+      modelUri: yandexChatUri(),
+      completionOptions: { temperature: 0.1, maxTokens: '2000' },
+      messages: [
+        { role: 'system', text: systemPrompt },
+        { role: 'user', text: userPrompt }
+      ]
+    })
+  });
+  if (!res.ok) await yandexHttpError(res);
+  const data = await res.json();
+  const text = data?.result?.alternatives?.[0]?.message?.text;
+  return (text || '').trim();
+}
+
+// Ответ от OpenAI (gpt-4o-mini и любые OpenAI-совместимые)
+async function openaiChat(systemPrompt, userPrompt) {
+  const completion = await getClient().chat.completions.create({
+    model: llmConfig.chatModel,
+    temperature: 0,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ]
+  });
+  return completion.choices[0]?.message?.content?.trim() || '';
+}
+
+// Универсальная генерация ответа по активному провайдеру
+function generateAnswer(systemPrompt, userPrompt) {
+  if (llmConfig.provider === 'yandex') return yandexChat(systemPrompt, userPrompt);
+  return openaiChat(systemPrompt, userPrompt);
+}
+
+/* ------------------------------------------------------------------ *
+ *  Эмбеддинги
  * ------------------------------------------------------------------ */
 async function embedTexts(texts) {
+  // Yandex: только по одному тексту за запрос
+  if (llmConfig.provider === 'yandex') {
+    const vectors = [];
+    for (const t of texts) vectors.push(await yandexEmbedOne(t));
+    return vectors;
+  }
+
+  // OpenAI: батчами по EMBEDDING_BATCH
   const vectors = [];
+  const client = getClient();
+  const model = llmConfig.embeddingModel;
   for (let i = 0; i < texts.length; i += EMBEDDING_BATCH) {
     const batch = texts.slice(i, i + EMBEDDING_BATCH);
-    const res = await openai.embeddings.create({
-      model: 'text-embedding-3-small',
+    const res = await client.embeddings.create({
+      model,
       input: batch
     });
     const ordered = [...res.data]
@@ -227,19 +401,9 @@ app.post('/api/query', async (req, res) => {
       )
       .join('\n\n---\n\n');
 
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      temperature: 0,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        {
-          role: 'user',
-          content: `КОНТЕКСТ (извлечён из загруженных файлов):\n${context}\n\n---\n\nВопрос пользователя: ${q}\n\nДай ответ строго на основе КОНТЕКСТА выше. Ничего не выдумывай.`
-        }
-      ]
-    });
+    const userPrompt = `КОНТЕКСТ (извлечён из загруженных файлов):\n${context}\n\n---\n\nВопрос пользователя: ${q}\n\nДай ответ строго на основе КОНТЕКСТА выше. Ничего не выдумывай.`;
 
-    const answer = completion.choices[0]?.message?.content?.trim() || '';
+    const answer = await generateAnswer(SYSTEM_PROMPT, userPrompt);
     const sources = top.map((c) => ({ fileName: c.fileName, chunkText: c.chunkText }));
 
     return res.json({ answer, sources });
@@ -257,6 +421,89 @@ app.get('/api/projects', async (req, res) => {
   } catch (err) {
     console.error('Projects error:', err);
     return res.status(500).json({ error: 'Ошибка при получении проектов' });
+  }
+});
+
+// Текущая конфигурация LLM.
+// apiKey НЕ возвращается открыто — только маска вида "sk-…abcD".
+app.get('/api/config', async (req, res) => {
+  try {
+    const cfg = getLLMConfig();
+    const maskedApiKey = cfg.apiKey
+      ? `${cfg.apiKey.slice(0, 3)}…${cfg.apiKey.slice(-4)}`
+      : '';
+    return res.json({
+      config: {
+        provider: cfg.provider,
+        baseURL: cfg.baseURL,
+        chatModel: cfg.chatModel,
+        embeddingModel: cfg.embeddingModel,
+        yandexFolderId: cfg.yandexFolderId,
+        hasApiKey: Boolean(cfg.apiKey),
+        maskedApiKey
+      }
+    });
+  } catch (err) {
+    console.error('Get config error:', err);
+    return res.status(500).json({ error: 'Ошибка при получении конфигурации' });
+  }
+});
+
+// Сохранение конфигурации LLM (в памяти).
+// Поле apiKey в запросе НЕОБЯЗАТЕЛЬНО: если не передано или пустое,
+// существующий ключ (из .env/памяти) сохраняется.
+app.post('/api/config', async (req, res) => {
+  try {
+    const { provider, baseURL, apiKey, chatModel, embeddingModel, yandexFolderId } =
+      req.body || {};
+
+    // Провайдер можно менять; при переключении на yandex подставляем его базовый URL,
+    // если пользователь не задал свой.
+    if (typeof provider === 'string' && (provider === 'openai' || provider === 'yandex')) {
+      const changingProvider = provider !== llmConfig.provider;
+      llmConfig.provider = provider;
+      if (changingProvider) {
+        llmConfig.baseURL =
+          provider === 'yandex' ? YANDEX_BASE : 'https://api.openai.com/v1';
+      }
+    }
+
+    if (typeof baseURL === 'string' && baseURL.trim()) llmConfig.baseURL = baseURL.trim();
+
+    if (typeof apiKey === 'string' && apiKey.trim() && apiKey !== '••••••••') {
+      llmConfig.apiKey = apiKey.trim();
+    }
+
+    if (typeof chatModel === 'string' && chatModel.trim()) llmConfig.chatModel = chatModel.trim();
+
+    if (typeof embeddingModel === 'string' && embeddingModel.trim()) {
+      llmConfig.embeddingModel = embeddingModel.trim();
+    }
+
+    if (typeof yandexFolderId === 'string' && yandexFolderId.trim()) {
+      llmConfig.yandexFolderId = yandexFolderId.trim();
+    }
+
+    resetClient(); // пересоздаём клиент под новую конфигурацию
+    return res.json({ ok: true, saved: true });
+  } catch (err) {
+    console.error('Save config error:', err);
+    return res.status(500).json({ error: 'Ошибка при сохранении конфигурации' });
+  }
+});
+
+// Подсказки по доступным моделям для UI
+app.get('/api/models', async (req, res) => {
+  try {
+    return res.json({
+      chatModels: KNOWN_CHAT_MODELS,
+      embeddingModels: KNOWN_EMBEDDING_MODELS,
+      yandexChatModels: YANDEX_CHAT_MODELS,
+      yandexEmbeddingModels: YANDEX_EMBEDDING_MODELS
+    });
+  } catch (err) {
+    console.error('Models error:', err);
+    return res.status(500).json({ error: 'Ошибка при получении списка моделей' });
   }
 });
 

@@ -11,3 +11,5 @@ npm.pid
 # OS / editor
 .DS_Store
 Thumbs.db
+
+frontend/.angular/cache

@@ -2,14 +2,105 @@
   <!-- Шапка -->
   <header class="topbar">
     <h1>🧶 Knowledge Weaver</h1>
-    <div class="project-select">
-      <label for="projectFilter">Проект:</label>
-      <select id="projectFilter" [(ngModel)]="selectedProject">
-        <option value="">Все</option>
-        <option *ngFor="let p of projects" [value]="p">{{ p }}</option>
-      </select>
+    <div class="topbar-actions">
+      <div class="project-select">
+        <label for="projectFilter">Проект:</label>
+        <select id="projectFilter" [(ngModel)]="selectedProject">
+          <option value="">Все</option>
+          <option *ngFor="let p of projects" [value]="p">{{ p }}</option>
+        </select>
+      </div>
+      <button class="btn-settings" (click)="toggleSettings()">
+        ⚙️ Настройки AI
+      </button>
     </div>
   </header>
+
+  <!-- Панель настроек AI -->
+  <section class="settings-panel" *ngIf="showSettings">
+    <h2>⚙️ Настройки AI-моделей</h2>
+
+    <div class="settings-grid">
+      <div class="field">
+        <label for="cfgProvider">Провайдер</label>
+        <select id="cfgProvider" [(ngModel)]="cfgProvider">
+          <option value="openai">OpenAI (и совместимые)</option>
+          <option value="yandex">YandexGPT</option>
+        </select>
+        <p class="hint">YandexGPT использует собственный формат API (не OpenAI).</p>
+      </div>
+
+      <div class="field">
+        <label for="cfgBaseURL">Base URL (API-провайдер)</label>
+        <input
+          id="cfgBaseURL"
+          [(ngModel)]="cfgBaseURL"
+          [placeholder]="isYandex ? 'https://llm.api.cloud.yandex.net' : 'https://api.openai.com/v1'"
+        />
+        <p class="hint">
+          {{ isYandex ? 'По умолчанию Yandex Cloud.' : 'Для OpenAI-совместимых API: OpenRouter, Groq, DeepSeek и т.д.' }}
+        </p>
+      </div>
+
+      <div class="field">
+        <label for="cfgApiKey">API-ключ</label>
+        <input
+          id="cfgApiKey"
+          type="password"
+          [(ngModel)]="cfgApiKey"
+          [placeholder]="llmConfig?.maskedApiKey || (isYandex ? 'Yandex API-ключ' : 'sk-…')"
+        />
+        <p class="hint" *ngIf="llmConfig?.hasApiKey">
+          Ключ уже сохранён: {{ llmConfig?.maskedApiKey }}. Вводите повторно только для замены.
+        </p>
+      </div>
+
+      <div class="field" *ngIf="isYandex">
+        <label for="cfgYandexFolderId">Folder ID (Yandex Cloud)</label>
+        <input
+          id="cfgYandexFolderId"
+          [(ngModel)]="cfgYandexFolderId"
+          placeholder="b1gxxxxxx"
+        />
+        <p class="hint">Обязателен для YandexGPT (входит в modelUri).</p>
+      </div>
+
+      <div class="field">
+        <label for="cfgChatModel">Chat-модель (ответы)</label>
+        <input id="cfgChatModel" [(ngModel)]="cfgChatModel" list="chatModelsList" />
+        <datalist id="chatModelsList">
+          <option *ngFor="let m of activeChatModels" [value]="m"></option>
+        </datalist>
+        <p class="hint">Можно ввести любую свою модель.</p>
+      </div>
+
+      <div class="field">
+        <label for="cfgEmbeddingModel">Embedding-модель (поиск)</label>
+        <input id="cfgEmbeddingModel" [(ngModel)]="cfgEmbeddingModel" list="embModelsList" />
+        <datalist id="embModelsList">
+          <option *ngFor="let m of activeEmbeddingModels" [value]="m"></option>
+        </datalist>
+        <p class="hint">Используется для индексации и запросов.</p>
+      </div>
+    </div>
+
+    <div class="settings-actions">
+      <button
+        class="btn-primary btn-save"
+        (click)="saveConfig()"
+        [disabled]="isSavingConfig"
+      >
+        <span *ngIf="!isSavingConfig">Сохранить</span>
+        <span *ngIf="isSavingConfig" class="spinner" aria-label="Сохранение"></span>
+      </button>
+      <button class="btn-secondary" (click)="showSettings = false">Закрыть</button>
+    </div>
+
+    <p class="message" *ngIf="configMessage">{{ configMessage }}</p>
+    <p class="warning" *ngIf="configLoaded && llmConfig && !llmConfig.hasApiKey">
+      ⚠️ API-ключ не задан. Введите ключ или укажите его в <code>backend/.env</code>.
+    </p>
+  </section>
 
   <div class="layout">
     <!-- Сайдбар: загрузка файлов -->

@@ -1,52 +1,29 @@
-Краткий журнал ключевых изменений проекта.
-Журнал изменений
+##№ Что реализовано
 
+### Часть 1 — Бэкенд (`/backend`)
 
-2026-08-31 — v0.2 Добавление возможности выбора провайдера и модели
+__`server.js`__ (ESM, Express + Multer + OpenAI SDK):
 
-Область: Architecture | Backend | Frontend | Documentation
+- Стек: Node ≥20, Express, `multer` (in-memory storage), `openai`, `cors`, `dotenv`.
+- Глобальное in-memory хранилище `globalKnowledge` — массив объектов `{ id, project, fileName, chunkText, vector }`.
+- __Чанкинг:__ `.txt`/`.md` — по 500 символов с перекрытием 50; `.js`/`.py`/`.json` — по 20 строкам.
+- __Эмбеддинги__ `text-embedding-3-small` — батчами по 8 (задаётся в `EMBEDDING_BATCH`).
+- __Косинусное сходство__ — чистая самописная функция `cosineSimilarity`.
+- __Системный промпт__ — жёстко зашит как константа (точное содержание `agent.md`).
 
-Что изменилось:
+__Эндпоинты:__
 
-    Добавлена возможность использования различных моделей от OpenAI
-    Добавлена возможность использовать YandexGPT
+- `POST /api/upload` — `multipart/form-data` (`file` + `project`), лимит 5MB, возвращает `{ saved }`.
+- `POST /api/query` — принимает `{ question, project? }`, фильтрует по проекту, топ-3 чанка при сходстве > 0.5, иначе не дёргает GPT. Возвращает `{ answer, sources: [{ fileName, chunkText }] }`.
+- `GET /api/projects` — уникальные проекты.
 
-Затронутые пути:
+__Обработка ошибок (как требовалось):__
 
-    frontend/app
-    backend/server.js
-    Skills.md
-    DevNotes.md
-    AgentHistory.md
+- Пустая база → `{ answer: "Нет загруженных данных" }`.
+- Проект не выбран, чанков в проекте нет или ниже порога → `"Не нашел информации в этом проекте"` (без вызова GPT).
+- 400 неверный файл/пустой вопрос, 413 превышение 5MB, 500 на остальные ошибки. Каждый блок логируется в консоль.
 
-Зачем / контекст:
-
-    Модель можно выбрать под свои нужды. В т. ч. использовать другого провайдера
-
-
-2026-08-31 — v0.1 (MVP) — «Просто работает»
-
-Область: Architecture | Backend | Frontend | Documentation
-
-Что изменилось:
-
-    Добавлены журнал и скиллы 
-    Реализован базовый бэкенд на Node.js + Express: чанкинг, эмбиддинг, косинусное свойсто и системный промт
-    Реализован тестовый фронт на Angular 
-
-Затронутые пути:
-
-    frontend/
-    backend/
-    Skills.md
-    DevNotes.md
-    agent.md
-    .gitignore
-
-Зачем / контекст:
-
-    Реализация MVP для аппробации функционала.
-
+Файлы: `server.js`, `package.json`, `.env.example` (и `.env` с пустым ключом для локального запуска).
 
 ### Часть 2 — Фронтенд (`/frontend`, Angular 17 standalone)
 
@@ -80,7 +57,6 @@
 - Хранилище in-memory: при перезапуске бэкенда данные сбрасываются — это ожидаемо для v0.1.
 - Полный поток с OpenAI (эмбеддинги + `gpt-4o-mini`) невозможно прогнать без вашего API-ключа; код использует точный требуемый SDK-интерфейс `embeddings.create({ model: 'text-embedding-3-small', input: batch })` и `chat.completions.create`.
 
-## v02 (MVP) — Поддержка разных моделей
 
 ## Что добавлено
 
@@ -115,3 +91,44 @@ __Новые эндпоинты:__
   - Chat-модель (input + `datalist` с подсказками, можно ввести свою),
   - Embedding-модель (аналогично),
   - Кнопки «Сохранить» (с лоадером) / «Закрыть», а также предупреждение, если ключ не задан.
+
+
+## Что сделано
+
+### Бэкенд (`backend/server.js`)
+
+YandexGPT использует __свой__ формат API (`foundationModels/v1`), а не OpenAI, поэтому написан отдельный адаптер с прямыми `fetch`-запросами:
+
+- __Конфигурация__: добавлены поля `provider` (`'openai' | 'yandex'`) и `yandexFolderId`.
+
+- __Адаптер Yandex__:
+
+  - Авторизация — `Authorization: Api-Key <ключ>` + заголовок `x-folder-id`.
+  - `yandexEmbedOne` → `POST …/foundationModels/v1/textEmbedding` с `modelUri: emb://<folder>/<model>/latest`.
+  - `yandexChat` → `POST …/foundationModels/v1/completion` с `modelUri: gpt://<folder>/<model>/latest` и сообщениями `{role, text}`.
+  - Обработка ошибок с пробросом статуса и тела ответа.
+
+- __`embedTexts`__: для Yandex — по одному эмбеддингу за запрос; для OpenAI — как раньше батчами.
+
+- __`generateAnswer(system, user)`__ — единая точка генерации, выбирает провайдера.
+
+- __`/api/query`__ теперь использует `generateAnswer` (вместо прямого вызова OpenAI).
+
+- __`/api/config`__ GET/POST: возвращает и принимает `provider` + `yandexFolderId`; при смене провайдера на Yandex бэкенд сам подставляет его base URL `https://llm.api.cloud.yandex.net` (и обратно OpenAI), если пользователь не задал свой.
+
+- __`/api/models`__: добавлены списки `yandexChatModels` (`yandexgpt-lite`, `yandexgpt`, `yandexgpt-pro`, `yandexgpt-32k`) и `yandexEmbeddingModels` (`text-search-doc`, `text-search-query`).
+
+- `.env.example` обновлён (переменные `LLM_PROVIDER`, `YANDEX_FOLDER_ID`, комментарии для YandexGPT).
+
+### Фронтенд (`frontend`)
+
+- __`knowledge.service.ts`__: тип `LLMProvider`, поля `provider`/`yandexFolderId` в конфиге и payload, новые списки моделей в `ModelsResponse`.
+
+- __`app.component.ts`__: селектор провайдера, поле folder ID, геттеры `isYandex` и `activeChatModels`/`activeEmbeddingModels` (переключают дата-листы под выбранного провайдера), загрузка/сохранение новых полей.
+
+- __Шаблон__: в панели «⚙️ Настройки AI» добавлены:
+
+  - селект __«Провайдер»__ (OpenAI / YandexGPT),
+  - поле __Folder ID__ (видно только для Yandex),
+  - Base URL и API-ключ с подсказками под провайдера,
+  - дата-листы моделей переключаются автоматически.

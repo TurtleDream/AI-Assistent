@@ -4,7 +4,13 @@ import { FormsModule } from '@angular/forms';
 import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 import { BehaviorSubject, Subject } from 'rxjs';
 import { takeUntil } from 'rxjs/operators';
-import { KnowledgeService, Source } from './knowledge.service';
+import {
+  KnowledgeService,
+  Source,
+  LLMConfig,
+  LLMProvider,
+  SaveConfigPayload
+} from './knowledge.service';
 
 @Component({
   selector: 'app-root',
@@ -28,6 +34,35 @@ export class AppComponent implements OnInit, OnDestroy {
   projects: string[] = [];
   selectedProject = ''; // '' => «Все»
 
+  // --- Конфигурация LLM ---
+  showSettings = false;
+  configLoaded = false;
+  llmConfig: LLMConfig | null = null;
+  chatModels: string[] = [];
+  embeddingModels: string[] = [];
+  yandexChatModels: string[] = [];
+  yandexEmbeddingModels: string[] = [];
+  cfgProvider: LLMProvider = 'openai';
+  cfgBaseURL = '';
+  cfgApiKey = '';
+  cfgChatModel = '';
+  cfgEmbeddingModel = '';
+  cfgYandexFolderId = '';
+  isSavingConfig = false;
+  configMessage = '';
+
+  get isYandex(): boolean {
+    return this.cfgProvider === 'yandex';
+  }
+
+  // Список для подсказок в зависимости от провайдера
+  get activeChatModels(): string[] {
+    return this.isYandex ? this.yandexChatModels : this.chatModels;
+  }
+  get activeEmbeddingModels(): string[] {
+    return this.isYandex ? this.yandexEmbeddingModels : this.embeddingModels;
+  }
+
   // --- Вопрос / ответ ---
   question = '';
   isAsking = false;
@@ -40,6 +75,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.loadProjects();
+    this.loadConfig();
   }
 
   ngOnDestroy(): void {
@@ -58,6 +94,85 @@ export class AppComponent implements OnInit, OnDestroy {
         error: (err) => {
           console.error('Get projects error', err);
           this.projects = [];
+        }
+      });
+  }
+
+  // ============================ Настройки LLM ============================
+
+  loadConfig(): void {
+    this.knowledge
+      .getConfig()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (res) => {
+          this.llmConfig = res.config;
+          this.cfgProvider = res.config.provider || 'openai';
+          this.cfgBaseURL = res.config.baseURL;
+          this.cfgChatModel = res.config.chatModel;
+          this.cfgEmbeddingModel = res.config.embeddingModel;
+          this.cfgYandexFolderId = res.config.yandexFolderId || '';
+          this.configLoaded = true;
+        },
+        error: (err) => {
+          console.error('Get config error', err);
+          this.configLoaded = true;
+        }
+      });
+
+    this.knowledge
+      .getModels()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (res) => {
+          this.chatModels = res.chatModels || [];
+          this.embeddingModels = res.embeddingModels || [];
+          this.yandexChatModels = res.yandexChatModels || [];
+          this.yandexEmbeddingModels = res.yandexEmbeddingModels || [];
+        },
+        error: (err) => {
+          console.error('Get models error', err);
+        }
+      });
+  }
+
+  toggleSettings(): void {
+    this.showSettings = !this.showSettings;
+    if (this.showSettings) {
+      this.configMessage = '';
+    }
+  }
+
+  saveConfig(): void {
+    this.isSavingConfig = true;
+    this.configMessage = '';
+    const payload: SaveConfigPayload = {};
+
+    payload.provider = this.cfgProvider;
+    if (this.cfgBaseURL.trim()) payload.baseURL = this.cfgBaseURL.trim();
+    if (this.cfgChatModel.trim()) payload.chatModel = this.cfgChatModel.trim();
+    if (this.cfgEmbeddingModel.trim()) payload.embeddingModel = this.cfgEmbeddingModel.trim();
+    if (this.cfgYandexFolderId.trim()) payload.yandexFolderId = this.cfgYandexFolderId.trim();
+    // Ключ отправляем только если пользователь реально ввёл новый
+    if (this.cfgApiKey.trim() && this.cfgApiKey.trim() !== '••••••••') {
+      payload.apiKey = this.cfgApiKey.trim();
+    }
+
+    this.knowledge
+      .saveConfig(payload)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: () => {
+          this.configMessage = 'Настройки сохранены ✅';
+          this.cfgApiKey = '';
+          this.loadConfig();
+        },
+        error: (err) => {
+          this.configMessage = err.error?.error || 'Ошибка сохранения настроек';
+          console.error('Save config error', err);
+        },
+        complete: () => {
+          this.isSavingConfig = false;
         }
       });
   }

@@ -21,6 +21,38 @@ export interface UploadResponse {
   saved: number;
 }
 
+export type LLMProvider = 'openai' | 'yandex';
+
+export interface LLMConfig {
+  provider: LLMProvider;
+  baseURL: string;
+  chatModel: string;
+  embeddingModel: string;
+  yandexFolderId: string;
+  hasApiKey: boolean;
+  maskedApiKey: string;
+}
+
+export interface ConfigResponse {
+  config: LLMConfig;
+}
+
+export interface SaveConfigPayload {
+  provider?: LLMProvider;
+  baseURL?: string;
+  apiKey?: string;
+  chatModel?: string;
+  embeddingModel?: string;
+  yandexFolderId?: string;
+}
+
+export interface ModelsResponse {
+  chatModels: string[];
+  embeddingModels: string[];
+  yandexChatModels: string[];
+  yandexEmbeddingModels: string[];
+}
+
 @Injectable({ providedIn: 'root' })
 export class KnowledgeService {
   private http = inject(HttpClient);
@@ -42,5 +74,20 @@ export class KnowledgeService {
   /** Получение списка уникальных проектов. */
   getProjects(): Observable<ProjectsResponse> {
     return this.http.get<ProjectsResponse>(`${this.baseUrl}/projects`);
+  }
+
+  /** Текущая конфигурация LLM (ключ возвращается замаскированным). */
+  getConfig(): Observable<ConfigResponse> {
+    return this.http.get<ConfigResponse>(`${this.baseUrl}/config`);
+  }
+
+  /** Сохранение конфигурации LLM. */
+  saveConfig(payload: SaveConfigPayload): Observable<{ ok: boolean; saved: boolean }> {
+    return this.http.post<{ ok: boolean; saved: boolean }>(`${this.baseUrl}/config`, payload);
+  }
+
+  /** Получение списков известных моделей для подсказок. */
+  getModels(): Observable<ModelsResponse> {
+    return this.http.get<ModelsResponse>(`${this.baseUrl}/models`);
   }
 }
