@@ -1,0 +1,13 @@
+# Node
+node_modules/
+dist/
+*.log
+npm.pid
+
+# Env / secrets
+.env
+.env.local
+
+# OS / editor
+.DS_Store
+Thumbs.db

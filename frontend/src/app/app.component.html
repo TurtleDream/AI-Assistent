@@ -1,0 +1,86 @@
+<div class="app">
+  <!-- Шапка -->
+  <header class="topbar">
+    <h1>🧶 Knowledge Weaver</h1>
+    <div class="project-select">
+      <label for="projectFilter">Проект:</label>
+      <select id="projectFilter" [(ngModel)]="selectedProject">
+        <option value="">Все</option>
+        <option *ngFor="let p of projects" [value]="p">{{ p }}</option>
+      </select>
+    </div>
+  </header>
+
+  <div class="layout">
+    <!-- Сайдбар: загрузка файлов -->
+    <aside class="sidebar">
+      <h2>Загрузка файлов</h2>
+
+      <div
+        class="dropzone"
+        [class.active]="selectedFile"
+        (dragover)="onDragOver($event)"
+        (drop)="onDrop($event)"
+      >
+        <p *ngIf="!selectedFile" class="dz-hint">Перетащите файл сюда<br>или</p>
+        <p *ngIf="selectedFile" class="dz-file">📄 {{ selectedFile.name }}</p>
+        <input type="file" id="fileInput" (change)="onFileSelected($event)" />
+        <label for="fileInput" class="btn-file">Выбрать файл</label>
+        <p class="hint">Поддерживаются: .txt, .md, .js, .py</p>
+      </div>
+
+      <div class="field">
+        <label for="projectName">Имя проекта</label>
+        <input id="projectName" [(ngModel)]="uploadProject" placeholder="например: notes" />
+      </div>
+
+      <button
+        class="btn-primary"
+        (click)="upload()"
+        [disabled]="isUploading || !selectedFile"
+      >
+        <span *ngIf="!isUploading">Загрузить</span>
+        <span *ngIf="isUploading" class="spinner" aria-label="Загрузка"></span>
+      </button>
+
+      <p class="message" *ngIf="uploadMessage">{{ uploadMessage }}</p>
+    </aside>
+
+    <!-- Основная область -->
+    <main class="main">
+      <div class="query-box">
+        <textarea
+          [(ngModel)]="question"
+          placeholder="Задайте вопрос по вашим заметкам или коду..."
+          rows="3"
+        ></textarea>
+        <button
+          class="btn-primary btn-ask"
+          (click)="ask()"
+          [disabled]="isLoading || !question.trim()"
+        >
+          <span *ngIf="!isAsking">Спросить</span>
+          <span *ngIf="isAsking" class="spinner" aria-label="Думаю"></span>
+        </button>
+      </div>
+
+      <!-- Ответ -->
+      <section class="answer" *ngIf="answer$ | async as answerHtml">
+        <h2>Ответ</h2>
+        <div class="answer-body" [innerHTML]="answerHtml"></div>
+
+        <div class="sources" *ngIf="sources$ | async as sources">
+          <h3>Источники</h3>
+          <div class="source-item" *ngFor="let s of sources">
+            <strong>📂 {{ s.fileName }}</strong>
+            <p>{{ s.chunkText }}</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="empty" *ngIf="!(answer$ | async) && !isLoading">
+        <p>Загрузите документы и задайте вопрос, чтобы начать.</p>
+      </section>
+    </main>
+  </div>
+</div>
