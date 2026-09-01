@@ -4,6 +4,7 @@ import multer from 'multer';
 import OpenAI from 'openai';
 import path from 'path';
 import dotenv from 'dotenv';
+import { Level } from 'level';
 
 dotenv.config();
 
@@ -89,11 +90,41 @@ const YANDEX_CHAT_MODELS = ['yandexgpt-lite', 'yandexgpt', 'yandexgpt-pro', 'yan
 const YANDEX_EMBEDDING_MODELS = ['text-search-doc', 'text-search-query'];
 
 /* ------------------------------------------------------------------ *
- *  Глобальное in-memory хранилище векторов.
+ *  Глобальное in-memory хранилище векторов (зеркало БД для быстрого поиска).
  *  Каждый объект: { id, project, fileName, chunkText, vector }
- *  ВАЖНО: при перезапуске сервера данные сбрасываются (для MVP OK).
+ *  Персистентность: LevelDB (npm "level") в папке ./db — данные сохраняются
+ *  между перезапусками сервера.
  * ------------------------------------------------------------------ */
 const globalKnowledge = [];
+
+/* ------------------------------------------------------------------ *
+ *  Постоянное хранение через LevelDB (npm package "level").
+ *  БД создаётся в папке ./db (относительно рабочей директории бэкенда).
+ *  Ключи:  chunk:{id}  → JSON { id, project, fileName, chunkText, vector }.
+ *  Пакет "level" (classic-level/abstract-level) НЕ предоставляет
+ *  createReadStream(); для полного обхода записей используем db.iterator()
+ *  (это актуальный API, эквивалентный по назначению).
+ * ------------------------------------------------------------------ */
+const db = new Level('./db', { valueEncoding: 'json' });
+
+// Полный обход всех записей БД и загрузка чанков в globalKnowledge.
+// (Аналог createReadStream из старых версий level.)
+async function loadAllFromDb() {
+  globalKnowledge.length = 0;
+  for await (const [key, value] of db.iterator()) {
+    // Учитываем только чанки вида chunk:{id}; будущие индексные ключи игнорируем.
+    if (!String(key).startsWith('chunk:')) continue;
+    globalKnowledge.push(value);
+  }
+  console.log(`[db] Загружено чанков из БД при старте: ${globalKnowledge.length}`);
+}
+
+// Полная очистка БД и сброс in-memory массива.
+async function clearAllFromDb() {
+  globalKnowledge.length = 0;
+  await db.clear();
+  console.log('[db] База данных полностью очищена');
+}
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB лимит загрузки
 const MAX_FILES = 10; // максимальное количество файлов за одну загрузку
@@ -418,18 +449,41 @@ app.post('/api/upload', upload.array('file'), async (req, res) => {
         continue;
       }
 
+      // Проверка дубликатов: если файл с таким же именем И тем же проектом уже
+      // загружен — пропускаем повторное индексирование, чтобы не тратить токены
+      // и не плодить копии. ЛОГИКА выбора: "skip" (пропустить), а не перезапись.
+      // Чтобы переключиться на "overwrite", нужно здесь удалять старые чанки
+      // файла (например, по ключу project:{project}:{id}) и сохранять новые.
+      const alreadyIndexed = globalKnowledge.some(
+        (c) => c.fileName === f.originalname && c.project === project
+      );
+      if (alreadyIndexed) {
+        results.push({
+          ...base,
+          ok: true,
+          skipped: true,
+          saved: 0,
+          error: 'Файл с таким именем уже загружен в этот проект — пропущен'
+        });
+        continue;
+      }
+
       const vectors = await embedTexts(chunks);
 
       const baseId = `${f.originalname}-${Date.now()}-${idx}`;
-      chunks.forEach((chunk, i) => {
-        globalKnowledge.push({
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = {
           id: `${baseId}-${i}`,
           project,
           fileName: f.originalname,
-          chunkText: chunk,
+          chunkText: chunks[i],
           vector: vectors[i]
-        });
-      });
+        };
+        // Сначала persist в LevelDB (ключ chunk:{id}), затем в in-memory массив,
+        // чтобы они не расходились при сбое посреди обработки файла.
+        await db.put(`chunk:${chunk.id}`, chunk);
+        globalKnowledge.push(chunk);
+      }
       totalSaved += chunks.length;
       results.push({ ...base, ok: true, saved: chunks.length });
     }
@@ -528,6 +582,36 @@ app.get('/api/projects', async (req, res) => {
   }
 });
 
+// Очистка всей базы данных (LevelDB + in-memory). Полезно для тестирования.
+app.delete('/api/clear', async (req, res) => {
+  try {
+    const cleared = globalKnowledge.length;
+    await clearAllFromDb();
+    return res.json({ ok: true, cleared });
+  } catch (err) {
+    console.error('Clear error:', err);
+    return res.status(500).json({ error: 'Ошибка при очистке базы данных' });
+  }
+});
+
+// Статистика: количество сохранённых чанков, файлов и список уникальных проектов.
+app.get('/api/stats', async (req, res) => {
+  try {
+    const projects = [...new Set(globalKnowledge.map((c) => c.project))];
+    const fileCount = new Set(
+      globalKnowledge.map((c) => `${c.project}::${c.fileName}`)
+    ).size;
+    return res.json({
+      chunkCount: globalKnowledge.length,
+      fileCount,
+      projects
+    });
+  } catch (err) {
+    console.error('Stats error:', err);
+    return res.status(500).json({ error: 'Ошибка при получении статистики' });
+  }
+});
+
 // Текущая конфигурация LLM.
 // apiKey НЕ возвращается открыто — только маска вида "sk-…abcD".
 app.get('/api/config', async (req, res) => {
@@ -612,6 +696,19 @@ app.get('/api/models', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Knowledge Weaver backend listening on http://localhost:${PORT}`);
+
+// Старт сервера: сначала открываем БД и подгружаем все сохранённые записи в
+// globalKnowledge, затем начинаем слушать порт.
+async function startServer() {
+  await db.open();
+  await loadAllFromDb();
+  app.listen(PORT, () => {
+    console.log(`Knowledge Weaver backend listening on http://localhost:${PORT}`);
+    console.log(`[db] База данных: ${db.location}`);
+  });
+}
+
+startServer().catch((err) => {
+  console.error('Ошибка при старте сервера:', err);
+  process.exit(1);
 });

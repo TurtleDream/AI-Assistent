@@ -168,3 +168,36 @@ __Компонент__ (`app.component.ts/html/css`):
 - `node --check backend/server.js` — синтаксис ок.
 - `tsc -p tsconfig.app.json --noEmit` — `EXIT_CODE=0`, без ошибок типов.
 - Обновлена строка-документация в `CONTEXT.md` (модель загрузки).
+
+
+## Что сделано
+
+### Персистентное хранение (`backend/server.js`)
+
+- Добавлена зависимость __`level`__ (`^10.0.0` — пакет уже был установлен, прописан в `package.json`).
+- БД создаётся __при старте сервера__ в папке __`./db`__ (`new Level('./db', { valueEncoding: 'json' })`).
+- Ключи: __`chunk:{id}`__ → JSON `{ project, fileName, chunkText, vector }`.
+- При загрузке файла каждый чанк сохраняется через __`db.put(chunk:{id}, …)`__, затем кладётся в `globalKnowledge`.
+- При старте запускается `loadAllFromDb()` — читает всю БД в `globalKnowledge` (загрузка через `db.iterator()`;__замечание:__ пакет `level` __v10__ не имеет `createReadStream()` — это актуальный API abstract-level, полностью эквивалентный по смыслу).
+- Старт сервера обёрнут в `async startServer()`: сначала `await db.open()`, затем загрузка записей, потом `app.listen`.
+
+### Логика дубликатов (выбрана «skip»)
+
+При загрузке файла проверяется,__не загружался ли уже файл с таким же `fileName` И `project`__. Если да — повторная индексация __пропускается__ (экономия токенов;, в ответ `{ skipped: true, saved: 0, error: «…пропущен» }`). Логика и способ переключения на «overwrite» описаны комментарием прямо в коде.
+
+### Новые эндпоинты
+
+- __`DELETE /api/clear`__ — `db.clear()` + сброс `globalKnowledge` → `{ ok, cleared }`.
+- __`GET /api/stats`__ — `{ chunkCount, fileCount, projects }`.
+
+В проекты/поиск не добавлял отдельный индекс — как разрешено для v0.2,поиск по проекту идёт сканированием `globalKnowledge`.
+
+## Тестикрование(проверено ранее via curl)
+
+1. `GET /api/stats` → `{ chunkCount:0, … }` (пустая БД).
+2. `/api/upload` (test.md, project p1) → `{ saved:1 }`.
+3. Повторный upload того же файла → `{ saved:0, skipped:true }`.
+4. __Рестарт сервера__ → «Загружено чанков из БД при старте: 1», `stats` снова `chunkCount:1` — данные пережили рестарт证明 персистентность..
+5. `DELETE /api/clear` → `{ ok, cleared:1 }`; после чего `stats` → `chunkCount0`.
+
+Все тестовые артефакты (`test.md`, логи, тестовая папка `./db`) удалены— при следующем старте `./db` создастся автоматически. Сервер был остановлен.
