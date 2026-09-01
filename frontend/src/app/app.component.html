@@ -138,6 +138,18 @@
       </button>
 
       <p class="message" *ngIf="uploadMessage">{{ uploadMessage }}</p>
+
+      <div class="doc-list">
+        <h2>📚 Загруженные файлы</h2>
+        <p class="hint" *ngIf="!documents.length">Пока нет загруженных файлов.</p>
+        <div class="doc-item" *ngFor="let doc of documents">
+          <div class="doc-info">
+            <strong>📄 {{ doc.fileName }}</strong>
+            <span class="doc-project">{{ doc.project }}</span>
+          </div>
+          <button class="btn-links" (click)="findLinks(doc)">🔗 Найти связи</button>
+        </div>
+      </div>
     </aside>
 
     <!-- Основная область -->
@@ -176,5 +188,45 @@
         <p>Загрузите документы и задайте вопрос, чтобы начать.</p>
       </section>
     </main>
+  </div>
+<!-- Модал: интеллектуальные связи -->
+  <div class="modal-overlay" *ngIf="activeLinksDoc" (click)="closeLinks()">
+    <div class="modal" (click)="$event.stopPropagation()">
+      <div class="modal-head">
+        <h2>🔗 Связи для «{{ activeLinksDoc.fileName }}»</h2>
+        <button class="btn-close" (click)="closeLinks()">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <div *ngIf="activeLinksLoading" class="links-loading">
+          <span class="spinner" aria-label="Расчёт"></span>
+          <span>Ищем семантические связи…</span>
+        </div>
+
+        <ng-container *ngIf="!activeLinksLoading">
+          <p class="links-error" *ngIf="linksError">{{ linksError }}</p>
+
+          <ng-container *ngIf="activeLinksSuggestions && activeLinksSuggestions.length">
+            <div class="suggestion-item" *ngFor="let sug of activeLinksSuggestions">
+              <div class="sug-info">
+                <strong>📄 {{ sug.fileName }}</strong>
+                <span class="similarity">{{ (sug.similarity * 100) | number:'1.0-1' }}% схожести</span>
+              </div>
+              <button
+                class="btn-link"
+                [class.linked]="isLinked(activeLinksDoc.docId, sug.docId)"
+                (click)="toggleLink(activeLinksDoc.docId, sug.docId)"
+              >
+                {{ isLinked(activeLinksDoc.docId, sug.docId) ? '✓ Связано' : 'Связать' }}
+              </button>
+            </div>
+          </ng-container>
+
+          <ng-container *ngIf="activeLinksSuggestions && !activeLinksSuggestions.length && !linksError">
+            <p class="links-empty">Для этого файла не найдено семантических связей</p>
+          </ng-container>
+        </ng-container>
+      </div>
+    </div>
   </div>
 </div>

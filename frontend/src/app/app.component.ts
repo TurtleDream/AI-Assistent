@@ -9,7 +9,9 @@ import {
   Source,
   LLMConfig,
   LLMProvider,
-  SaveConfigPayload
+  SaveConfigPayload,
+  DocumentInfo,
+  Suggestion
 } from './knowledge.service';
 
 @Component({
@@ -29,6 +31,18 @@ export class AppComponent implements OnInit, OnDestroy {
   uploadProject = '';
   isUploading = false;
   uploadMessage = '';
+
+  // --- Интеллектуальные связи между файлами ---
+  documents: DocumentInfo[] = [];
+  /** Текущие рекомендации по каждому docId: undefined = ещё не считались. */
+  suggestionsByDoc: { [docId: string]: Suggestion[] | undefined } = {};
+  /** Документ, для которого открыт модал со связями. */
+  activeLinksDoc: DocumentInfo | null = null;
+  /** docId файла, для которого идёт расчёт связей (спиннер). */
+  isSuggestingDoc: string | null = null;
+  linksError = '';
+  /** Визуальные установленные связи: ключ `${docId}::${suggestedDocId}`. */
+  linkedPairs = new Set<string>();
 
   // --- Проекты / фильтр ---
   projects: string[] = [];
@@ -73,9 +87,22 @@ export class AppComponent implements OnInit, OnDestroy {
     return this.isUploading || this.isAsking;
   }
 
+  /** Текущие предложенные связи для открытого модала (undefined = расчёт не завершён). */
+  get activeLinksSuggestions(): Suggestion[] | undefined {
+    return this.activeLinksDoc
+      ? this.suggestionsByDoc[this.activeLinksDoc.docId]
+      : undefined;
+  }
+
+  /** Идёт ли расчёт связей для открытого модала (спиннер). */
+  get activeLinksLoading(): boolean {
+    return !!(this.activeLinksDoc && this.isSuggestingDoc === this.activeLinksDoc.docId);
+  }
+
   ngOnInit(): void {
     this.loadProjects();
     this.loadConfig();
+    this.loadDocuments();
   }
 
   ngOnDestroy(): void {
@@ -94,6 +121,21 @@ export class AppComponent implements OnInit, OnDestroy {
         error: (err) => {
           console.error('Get projects error', err);
           this.projects = [];
+        }
+      });
+  }
+
+  loadDocuments(): void {
+    this.knowledge
+      .getDocuments()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (res) => {
+          this.documents = res.documents || [];
+        },
+        error: (err) => {
+          console.error('Get documents error', err);
+          this.documents = [];
         }
       });
   }
@@ -226,6 +268,7 @@ export class AppComponent implements OnInit, OnDestroy {
           this.uploadProject = '';
           if (res.saved > 0) {
             this.loadProjects();
+            this.loadDocuments();
           }
         },
         error: (err) => {
@@ -233,6 +276,53 @@ export class AppComponent implements OnInit, OnDestroy {
           console.error('Upload error', err);
         }
       });
+  }
+
+  // ============================ Связи между файлами ============================
+
+  findLinks(doc: DocumentInfo): void {
+    this.activeLinksDoc = doc;
+    this.linksError = '';
+    // Сбрасываем прежний результат, чтобы сразу показать спиннер.
+    this.suggestionsByDoc[doc.docId] = undefined;
+    this.isSuggestingDoc = doc.docId;
+
+    this.knowledge
+      .getSuggestions(doc.docId)
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.isSuggestingDoc = null;
+        })
+      )
+      .subscribe({
+        next: (res) => {
+          this.suggestionsByDoc[doc.docId] = res.suggestions || [];
+        },
+        error: (err) => {
+          this.suggestionsByDoc[doc.docId] = [];
+          this.linksError = err.error?.error || 'Ошибка при поиске связей';
+          console.error('Suggest-links error', err);
+        }
+      });
+  }
+
+  closeLinks(): void {
+    this.activeLinksDoc = null;
+    this.linksError = '';
+  }
+
+  isLinked(targetDocId: string, suggestedDocId: string): boolean {
+    return this.linkedPairs.has(`${targetDocId}::${suggestedDocId}`);
+  }
+
+  toggleLink(targetDocId: string, suggestedDocId: string): void {
+    const key = `${targetDocId}::${suggestedDocId}`;
+    if (this.linkedPairs.has(key)) {
+      this.linkedPairs.delete(key);
+    } else {
+      this.linkedPairs.add(key);
+    }
   }
 
   // ============================ Вопрос ============================

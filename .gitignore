@@ -13,3 +13,4 @@ npm.pid
 Thumbs.db
 
 frontend/.angular/cache
+backend/db

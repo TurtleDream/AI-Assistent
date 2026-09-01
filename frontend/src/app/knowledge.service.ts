@@ -57,6 +57,35 @@ export interface ModelsResponse {
   yandexEmbeddingModels: string[];
 }
 
+// --- Интеллектуальные связи между файлами ---
+export interface DocumentInfo {
+  docId: string;
+  fileName: string;
+  project: string;
+}
+
+export interface DocumentsResponse {
+  documents: DocumentInfo[];
+}
+
+export interface Suggestion {
+  docId: string;
+  fileName: string;
+  similarity: number;
+}
+
+export interface DocSuggestions {
+  docId: string;
+  fileName: string;
+  suggested: Suggestion[];
+}
+
+export interface SuggestResponse {
+  docId?: string;
+  suggestions?: Suggestion[];
+  all?: DocSuggestions[];
+}
+
 @Injectable({ providedIn: 'root' })
 export class KnowledgeService {
   private http = inject(HttpClient);
@@ -93,5 +122,15 @@ export class KnowledgeService {
   /** Получение списков известных моделей для подсказок. */
   getModels(): Observable<ModelsResponse> {
     return this.http.get<ModelsResponse>(`${this.baseUrl}/models`);
+  }
+
+  /** Получение списка загруженных документов (файлов) — для UI. */
+  getDocuments(): Observable<DocumentsResponse> {
+    return this.http.get<DocumentsResponse>(`${this.baseUrl}/docs`);
+  }
+
+  /** Семантические связи для конкретного файла (docId). */
+  getSuggestions(docId: string): Observable<SuggestResponse> {
+    return this.http.post<SuggestResponse>(`${this.baseUrl}/suggest-links`, { docId });
   }
 }
