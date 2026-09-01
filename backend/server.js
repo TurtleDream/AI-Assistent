@@ -3,8 +3,9 @@ import cors from 'cors';
 import multer from 'multer';
 import OpenAI from 'openai';
 import path from 'path';
+import fs from 'fs';
 import dotenv from 'dotenv';
-import { Level } from 'level';
+import { DatabaseSync } from 'node:sqlite';
 
 dotenv.config();
 
@@ -90,39 +91,63 @@ const YANDEX_CHAT_MODELS = ['yandexgpt-lite', 'yandexgpt', 'yandexgpt-pro', 'yan
 const YANDEX_EMBEDDING_MODELS = ['text-search-doc', 'text-search-query'];
 
 /* ------------------------------------------------------------------ *
- *  Глобальное in-memory хранилище векторов (зеркало БД для быстрого поиска).
- *  Каждый объект: { id, project, fileName, chunkText, vector }
- *  Персистентность: LevelDB (npm "level") в папке ./db — данные сохраняются
- *  между перезапусками сервера.
+ *  Постоянное хранилище: встроенный SQLite (node:sqlite, Node.js 22.5+).
+ *  Замена прежнего LevelDB + in-memory зеркала globalKnowledge.
+ *  Файл БД: ./db/knowledge.sqlite
  * ------------------------------------------------------------------ */
-const globalKnowledge = [];
+const DB_DIR = path.join(process.cwd(), 'db');
+const DB_PATH = path.join(DB_DIR, 'knowledge.sqlite');
 
-/* ------------------------------------------------------------------ *
- *  Постоянное хранение через LevelDB (npm package "level").
- *  БД создаётся в папке ./db (относительно рабочей директории бэкенда).
- *  Ключи:  chunk:{id}  → JSON { id, project, fileName, chunkText, vector }.
- *  Пакет "level" (classic-level/abstract-level) НЕ предоставляет
- *  createReadStream(); для полного обхода записей используем db.iterator()
- *  (это актуальный API, эквивалентный по назначению).
- * ------------------------------------------------------------------ */
-const db = new Level('./db', { valueEncoding: 'json' });
+let db = null;
 
-// Полный обход всех записей БД и загрузка чанков в globalKnowledge.
-// (Аналог createReadStream из старых версий level.)
-async function loadAllFromDb() {
-  globalKnowledge.length = 0;
-  for await (const [key, value] of db.iterator()) {
-    // Учитываем только чанки вида chunk:{id}; будущие индексные ключи игнорируем.
-    if (!String(key).startsWith('chunk:')) continue;
-    globalKnowledge.push(value);
-  }
-  console.log(`[db] Загружено чанков из БД при старте: ${globalKnowledge.length}`);
+// Миграция при старте: создаёт таблицы documents и chunks (если не существуют).
+//  - documents.id         — уникальный id документа, на который ссылаются чанки
+//  - documents.doc_vector — УСРЕДНЁННЫЙ вектор документа (TEXT, JSON-массив)
+//  - chunks.vector        — вектор чанка (TEXT, JSON-массив); ищем по чанкам
+function migrateSchema() {
+  db.exec(`
+    PRAGMA foreign_keys = ON;
+
+    CREATE TABLE IF NOT EXISTS documents (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      project    TEXT NOT NULL,
+      fileName   TEXT NOT NULL,
+      ext        TEXT NOT NULL DEFAULT '',
+      fileSize   INTEGER NOT NULL DEFAULT 0,
+      chunkCount INTEGER NOT NULL DEFAULT 0,
+      doc_vector TEXT,
+      createdAt  TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS chunks (
+      id          TEXT PRIMARY KEY,
+      document_id INTEGER NOT NULL,
+      project     TEXT NOT NULL,
+      fileName    TEXT NOT NULL,
+      chunk_index INTEGER NOT NULL DEFAULT 0,
+      chunkText   TEXT NOT NULL,
+      vector      TEXT,
+      FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_documents_project ON documents(project);
+    CREATE INDEX IF NOT EXISTS idx_chunks_project ON chunks(project);
+    CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
+  `);
 }
 
-// Полная очистка БД и сброс in-memory массива.
-async function clearAllFromDb() {
-  globalKnowledge.length = 0;
-  await db.clear();
+// Открытие БД и выполнение миграции (вызывается при старте сервера).
+function openDatabase() {
+  if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
+  db = new DatabaseSync(DB_PATH);
+  migrateSchema();
+  console.log(`[db] SQLite подключён: ${DB_PATH}`);
+}
+
+// Полная очистка таблиц (удаление документов каскадно удаляет их чанки).
+function clearAllFromDb() {
+  db.exec('DELETE FROM chunks;');
+  db.exec('DELETE FROM documents;');
   console.log('[db] База данных полностью очищена');
 }
 
@@ -186,6 +211,18 @@ function cosineSimilarity(a, b) {
   }
   if (normA === 0 || normB === 0) return 0;
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+// Усреднённый вектор (для documents.doc_vector): покомпонентное среднее
+// всех векторов чанков документа. Возвращает обычный массив чисел.
+function averageVectors(vectors) {
+  if (!vectors || vectors.length === 0) return [];
+  const dims = vectors[0].length;
+  const sum = new Array(dims).fill(0);
+  for (const v of vectors) {
+    for (let d = 0; d < dims; d++) sum[d] += v[d];
+  }
+  return sum.map((x) => x / vectors.length);
 }
 
 /* ------------------------------------------------------------------ *
@@ -426,6 +463,16 @@ app.post('/api/upload', upload.array('file'), async (req, res) => {
     const results = [];
     let totalSaved = 0;
 
+    // Подготовленные выражения (один раз, переиспользуем в цикле).
+    const insertDoc = db.prepare(
+      `INSERT INTO documents (project, fileName, ext, fileSize, chunkCount, doc_vector, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    );
+    const insertChunk = db.prepare(
+      `INSERT INTO chunks (id, document_id, project, fileName, chunk_index, chunkText, vector)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    );
+
     for (let idx = 0; idx < files.length; idx++) {
       const f = files[idx];
       const ext = path.extname(f.originalname).toLowerCase();
@@ -449,15 +496,13 @@ app.post('/api/upload', upload.array('file'), async (req, res) => {
         continue;
       }
 
-      // Проверка дубликатов: если файл с таким же именем И тем же проектом уже
-      // загружен — пропускаем повторное индексирование, чтобы не тратить токены
-      // и не плодить копии. ЛОГИКА выбора: "skip" (пропустить), а не перезапись.
-      // Чтобы переключиться на "overwrite", нужно здесь удалять старые чанки
-      // файла (например, по ключу project:{project}:{id}) и сохранять новые.
-      const alreadyIndexed = globalKnowledge.some(
-        (c) => c.fileName === f.originalname && c.project === project
-      );
-      if (alreadyIndexed) {
+      // Проверка дубликатов через БД: если файл с таким же именем И тем же
+      // проектом уже загружен — пропускаем повторное индексирование, чтобы не
+      // тратить токены и не плодить копии. ЛОГИКА выбора: "skip", а не перезапись.
+      const existing = db
+        .prepare('SELECT id FROM documents WHERE fileName = ? AND project = ? LIMIT 1')
+        .get(f.originalname, project);
+      if (existing) {
         results.push({
           ...base,
           ok: true,
@@ -470,19 +515,33 @@ app.post('/api/upload', upload.array('file'), async (req, res) => {
 
       const vectors = await embedTexts(chunks);
 
+      // Усреднённый вектор документа — отдельное поле documents.doc_vector (TEXT-JSON).
+      const docVector = averageVectors(vectors);
+
+      // 1) Сначала документ (получаем его id), потом — чанки, ссылающиеся на него.
+      const docResult = insertDoc.run(
+        project,
+        f.originalname,
+        ext,
+        f.size,
+        chunks.length,
+        JSON.stringify(docVector),
+        new Date().toISOString()
+      );
+      const documentId = Number(docResult.lastInsertRowid);
+
+      // 2) Чанки файла: вектор каждого чанка храним как TEXT (JSON-массив).
       const baseId = `${f.originalname}-${Date.now()}-${idx}`;
       for (let i = 0; i < chunks.length; i++) {
-        const chunk = {
-          id: `${baseId}-${i}`,
+        insertChunk.run(
+          `${baseId}-${i}`,
+          documentId,
           project,
-          fileName: f.originalname,
-          chunkText: chunks[i],
-          vector: vectors[i]
-        };
-        // Сначала persist в LevelDB (ключ chunk:{id}), затем в in-memory массив,
-        // чтобы они не расходились при сбое посреди обработки файла.
-        await db.put(`chunk:${chunk.id}`, chunk);
-        globalKnowledge.push(chunk);
+          f.originalname,
+          i,
+          chunks[i],
+          JSON.stringify(vectors[i])
+        );
       }
       totalSaved += chunks.length;
       results.push({ ...base, ok: true, saved: chunks.length });
@@ -523,26 +582,35 @@ app.post('/api/query', async (req, res) => {
       return res.status(400).json({ error: 'Вопрос не должен быть пустым' });
     }
 
-    // 1. Пустая база
-    if (globalKnowledge.length === 0) {
+    // 1. Пустая база (нет ни одного чанка)
+    const totalRow = db.prepare('SELECT COUNT(*) AS n FROM chunks').get();
+    if (!Number(totalRow.n)) {
       return res.json({ answer: 'Нет загруженных данных', sources: [] });
     }
 
-    // 2. Фильтр по проекту, если указан
-    let candidates = globalKnowledge;
+    // 2. Достаём чанки из SQLite (векторы хранятся как TEXT-JSON → парсим позже).
+    //    Если указан проект — фильтруем на уровне SQL по индексу idx_chunks_project.
+    let rows;
     if (project) {
-      candidates = candidates.filter((c) => c.project === project);
+      rows = db
+        .prepare('SELECT id, project, fileName, chunkText, vector FROM chunks WHERE project = ?')
+        .all(project);
+    } else {
+      rows = db.prepare('SELECT id, project, fileName, chunkText, vector FROM chunks').all();
     }
-    if (candidates.length === 0) {
+    if (rows.length === 0) {
       return res.json({ answer: 'Не нашел информации в этом проекте', sources: [] });
     }
 
     // 3. Эмбеддинг вопроса
     const [qVector] = await embedTexts([q]);
 
-    // 4. Косинусное сходство + топ-3 с порогом > 0.5
-    const scored = candidates
-      .map((c) => ({ ...c, score: cosineSimilarity(qVector, c.vector) }))
+    // 4. Косинусное сходство + топ-3 с порогом > 0.5 (по каждому чанку)
+    const scored = rows
+      .map((r) => {
+        const vector = r.vector ? JSON.parse(r.vector) : null;
+        return { ...r, vector, score: cosineSimilarity(qVector, vector) };
+      })
       .sort((a, b) => b.score - a.score);
 
     const top = scored.filter((c) => c.score > SIMILARITY_THRESHOLD).slice(0, TOP_K);
@@ -571,22 +639,43 @@ app.post('/api/query', async (req, res) => {
   }
 });
 
-// Список уникальных проектов
+// Список уникальных проектов (из таблицы документов)
 app.get('/api/projects', async (req, res) => {
   try {
-    const projects = [...new Set(globalKnowledge.map((c) => c.project))];
-    return res.json({ projects });
+    const rows = db
+      .prepare('SELECT DISTINCT project FROM documents ORDER BY project')
+      .all();
+    return res.json({ projects: rows.map((r) => r.project) });
   } catch (err) {
     console.error('Projects error:', err);
     return res.status(500).json({ error: 'Ошибка при получении проектов' });
   }
 });
 
-// Очистка всей базы данных (LevelDB + in-memory). Полезно для тестирования.
+// Список загруженных документов для UI (docId = documents.id).
+app.get('/api/docs', async (req, res) => {
+  try {
+    const rows = db
+      .prepare('SELECT id, fileName, project FROM documents ORDER BY id')
+      .all();
+    const documents = rows.map((r) => ({
+      docId: String(r.id),
+      fileName: r.fileName,
+      project: r.project
+    }));
+    return res.json({ documents });
+  } catch (err) {
+    console.error('Docs error:', err);
+    return res.status(500).json({ error: 'Ошибка при получении списка документов' });
+  }
+});
+
+// Очистка всей базы данных (SQLite). Полезно для тестирования.
 app.delete('/api/clear', async (req, res) => {
   try {
-    const cleared = globalKnowledge.length;
-    await clearAllFromDb();
+    const row = db.prepare('SELECT COUNT(*) AS n FROM chunks').get();
+    const cleared = Number(row.n);
+    clearAllFromDb();
     return res.json({ ok: true, cleared });
   } catch (err) {
     console.error('Clear error:', err);
@@ -597,15 +686,13 @@ app.delete('/api/clear', async (req, res) => {
 // Статистика: количество сохранённых чанков, файлов и список уникальных проектов.
 app.get('/api/stats', async (req, res) => {
   try {
-    const projects = [...new Set(globalKnowledge.map((c) => c.project))];
-    const fileCount = new Set(
-      globalKnowledge.map((c) => `${c.project}::${c.fileName}`)
-    ).size;
-    return res.json({
-      chunkCount: globalKnowledge.length,
-      fileCount,
-      projects
-    });
+    const chunkCount = Number(db.prepare('SELECT COUNT(*) AS n FROM chunks').get().n);
+    const fileCount = Number(db.prepare('SELECT COUNT(*) AS n FROM documents').get().n);
+    const projects = db
+      .prepare('SELECT DISTINCT project FROM documents ORDER BY project')
+      .all()
+      .map((r) => r.project);
+    return res.json({ chunkCount, fileCount, projects });
   } catch (err) {
     console.error('Stats error:', err);
     return res.status(500).json({ error: 'Ошибка при получении статистики' });
@@ -697,14 +784,13 @@ app.get('/api/models', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 
-// Старт сервера: сначала открываем БД и подгружаем все сохранённые записи в
-// globalKnowledge, затем начинаем слушать порт.
+// Старт сервера: сначала открываем SQLite и выполняем миграцию таблиц,
+// затем начинаем слушать порт.
 async function startServer() {
-  await db.open();
-  await loadAllFromDb();
+  openDatabase(); // миграция таблиц выполняется внутри
   app.listen(PORT, () => {
     console.log(`Knowledge Weaver backend listening on http://localhost:${PORT}`);
-    console.log(`[db] База данных: ${db.location}`);
+    console.log(`[db] База данных: ${DB_PATH}`);
   });
 }
 

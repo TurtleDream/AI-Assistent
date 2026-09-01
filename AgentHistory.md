@@ -201,3 +201,37 @@ __Компонент__ (`app.component.ts/html/css`):
 5. `DELETE /api/clear` → `{ ok, cleared:1 }`; после чего `stats` → `chunkCount0`.
 
 Все тестовые артефакты (`test.md`, логи, тестовая папка `./db`) удалены— при следующем старте `./db` создастся автоматически. Сервер был остановлен.
+
+
+## Что сделано
+
+### 1. Миграция при старте (скрипт в `backend/server.js`)
+
+Заменил `level` (LevelDB) на встроенный __`node:sqlite`__ (`DatabaseSync`). Функция `openDatabase()` вызывается в `startServer()` и создаёт при запуске таблицы __`documents`__ и __`chunks`__ (`CREATE TABLE IF NOT EXISTS` + индексы) в файле `./db/knowledge.sqlite`:
+
+- __`documents`__: `id` (INTEGER PK AUTOINCREMENT), `project`, `fileName`, `ext`, `fileSize`, `chunkCount`, __`doc_vector`__ (TEXT, усреднённый вектор документа), `createdAt`.
+- __`chunks`__: `id` (TEXT PK), `document_id` → `documents(id)` с __`ON DELETE CASCADE`__, `project`, `fileName`, `chunk_index`, `chunkText`, __`vector`__ (TEXT, JSON-строка).
+
+### 2. Переписан `POST /api/upload`
+
+- Загрузка файлов через `multer` сохранена.
+- Сначала вставляется документ (считается и кладётся `doc_vector` — покомпонентное среднее векторов чанков), затем чанки со ссылкой на `document_id`.
+- Все векторы хранятся как `TEXT` (JSON-массив).
+- Проверка дубликатов теперь через `SELECT` из `documents` (по `fileName`+`project`).
+
+### 3. Убран `globalKnowledge`
+
+Полностью удалены in-memory массив и `loadAllFromDb()`/`db.iterator()`. Все эндпоинты переведены на SQL:
+
+- `/api/query` — выборка чанков через `SELECT FROM chunks`, фильтр по `project`, `JSON.parse` векторов + косинусное сходство.
+- `/api/projects`, `/api/stats`, `/api/clear` — SQL-запросы.
+- `clearAllFromDb()` — `DELETE` из таблиц (каскадно).
+
+### 4. Бонус: `/api/docs`
+
+Фронтенд уже вызывал `GET /api/docs` для списка документов, но эндпоинта не было. Добавил его — возвращает `{ documents: [{ docId, fileName, project }] }` из таблицы `documents`.
+
+### 5. Прочее
+
+- Из `package.json` удалена зависимость `level` (перегенерён `package-lock.json`), добавлено `"engines": { "node": ">=22.5.0" }`.
+- Обновил устаревшие описания в `CONTEXT.md` (LevelDB → SQLite).

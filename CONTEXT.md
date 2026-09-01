@@ -16,7 +16,7 @@
 
 - **Backend:** Node ≥ 20, Express, Multer (in-memory), OpenAI SDK (`openai` npm), CORS, dotenv. ESM (`"type": "module"`).
 - **Frontend:** Angular 17, **standalone-компоненты**, `inject()` вместо конструктора, `HttpClient`, RxJS (`BehaviorSubject`, `takeUntil`, `finalize`). Сторонних CSS-фреймворков нет — базовый CSS.
-- **Хранение векторов:** LevelDB (npm `level` v10, папка `./db`) — персистентное хранилище; `globalKnowledge` — in-memory зеркало для быстрого поиска. Косинусное сходство — самописная чистая функция.
+- **Хранение векторов:** встроенный **SQLite** (`node:sqlite`, Node.js 22.5+; в 22.x нужен флаг `--experimental-sqlite`). Таблицы `documents` и `chunks`, файл `./db/knowledge.sqlite`. Вектор чанка и `doc_vector` — TEXT (JSON-строка). Косинусное сходство — самописная чистая функция.
 - **Модели:** `text-embedding-3-small` (эмбеддинги), `gpt-4o-mini` (ответы) — для OpenAI. YandexGPT — отдельный адаптер.
 - **Системный промпт** жёстко зашит в сервере (копия содержимого `agent.md`), запрет галлюцинаций + источники.
 
@@ -32,7 +32,7 @@
 │  ├─ server.js        ← ВСЯ логика бэкенда (единый файл)
 │  ├─ package.json     (type: module)
 │  ├─ .env / .env.example
-│  ├─ db/              ← LevelDB (создаётся автоматически при старте)
+│  ├─ db/              ← SQLite: knowledge.sqlite (создаётся автоматически при старте)
 ├─ frontend/
 │  ├─ angular.json     (browser-target и serve; buildTarget в options!)
 │  ├─ tsconfig.json / tsconfig.app.json
@@ -47,11 +47,12 @@
 
 ## 4. Бэкенд — `backend/server.js`
 
-### Хранилище записей (LevelDB + in-memory)
-- **LevelDB** (npm `level` v10, классический LevelDB): открывается при старте сервера в папке `./db` (`new Level('./db', { valueEncoding: 'json' })`).
-  - Ключи: `chunk:{id}` → JSON `{ id, project, fileName, chunkText, vector }`.
-  - Пакет `level` (abstract-level) **НЕ имеет** `createReadStream()` — полный обход записей через `db.iterator()`.
-- `globalKnowledge` — in-memory **зеркало БД** (массив `{ id, project, fileName, chunkText, vector }`). Заполняется из БД при старте; при загрузке файла чанки пишутся и в БД (`db.put(chunk:{id}, …)`), и в массив.
+### Хранилище записей (SQLite via `node:sqlite`)
+- **SQLite** (встроенный `DatabaseSync`, Node.js 22.5+): открывается при старте сервера в `./db/knowledge.sqlite` (в 22.x требуется флаг `--experimental-sqlite`; с v23.4+ — без флага). Импорт: `import { DatabaseSync } from 'node:sqlite'`.
+- **Таблица `documents`**: `id INTEGER PK AUTOINCREMENT`, `project`, `fileName`, `ext`, `fileSize`, `chunkCount`, `doc_vector TEXT` (усреднённый вектор документа, JSON-строка), `createdAt`.
+- **Таблица `chunks`**: `id TEXT PK`, `document_id INTEGER → documents(id) ON DELETE CASCADE`, `project`, `fileName`, `chunk_index`, `chunkText`, `vector TEXT` (JSON-строка вектора чанка). Индексы по `project` (обе таблицы) и `document_id`.
+- `openDatabase()` — открывает БД и выполняет миграцию `CREATE TABLE IF NOT EXISTS` при старте.
+- Поиск/фильтр по проекту идут **SQL-запросами** (`SELECT ... FROM chunks WHERE project = ?`); векторы десериализуются через `JSON.parse`, сходство — `cosineSimilarity()`.
 - `llmConfig` + дефолты из env: `{ provider, baseURL, apiKey, chatModel, embeddingModel, yandexFolderId }`.
   - Провайдер: `'openai' | 'yandex'`.
   - OpenAI-дефолты: baseURL `https://api.openai.com/v1`, chat `gpt-4o-mini`, emb `text-embedding-3-small`.
@@ -66,8 +67,8 @@
 - `cosineSimilarity(a, b)` — чистая функция.
 - `embedTexts(texts)` — батчи по `EMBEDDING_BATCH` (8); для yandex — по одному (`yandexEmbedOne`).
 - `generateAnswer(system, user)` — выбирает `yandexChat()` или `openaiChat()` по провайдеру.
-- `loadAllFromDb()` — на старте читает всю БД через `db.iterator()` (фильтр по ключам `chunk:`) и наполняет `globalKnowledge`.
-- `clearAllFromDb()` — `db.clear()` + сброс `globalKnowledge` (используется в `DELETE /api/clear`).
+- `averageVectors(vectors)` — усреднённый вектор для `documents.doc_vector`.
+- `openDatabase()` — открывает SQLite и мигрирует схему; `clearAllFromDb()` — `DELETE` из таблиц (каскадно вместе с чанками). Используется в `DELETE /api/clear`.
 - Yandex-адаптер: `yandexHeaders()`, `yandexBase()`, `yandexEmbedUrl()`, `yandexChatUrl()`, `yandexChatUri()`, `yandexEmbedUri()`, `yandexHttpError(res, modelUri)`, `friendlyError(err, fallback)`.
 - Endpoint: `https://llm.api.cloud.yandex.net/foundationModels/v1/{textEmbedding|completion}`.
   - modelUri формат (обязательно `/latest`!): `emb://<folder_id>/<модель>/latest`, `gpt://<folder_id>/<модель>/latest`.
@@ -134,4 +135,4 @@
 - После правки конфигурации LLM на бэке вызывается `resetClient()` (пересоздание OpenAI-клиента).
 - API-ключ в GET config не отдаётся открыто — только `hasApiKey` + `maskedApiKey`.
 - `angular.json`: у serve-таргета `buildTarget` обязан быть в `options` (иначе ошибка валидации схемы).
-- **LLM-конфиг хранится в памяти** — сбрасывается при рестарте бэкенда（для v0.1 допустимо**. **Записи（чанки）персистентны** — хранятся в LevelDB `./db` и переживают рестарт; папка `./db` автогенерируется при старте.
+- **LLM-конфиг хранится в памяти** — сбрасывается при рестарте бэкенда（для v0.1 допустимо**. **Записи（чанки）персистентны** — хранятся в SQLite `./db/knowledge.sqlite` и переживают рестарт; файл автогенерируется при старте.
