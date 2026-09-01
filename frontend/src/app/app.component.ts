@@ -3,7 +3,7 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 import { BehaviorSubject, Subject } from 'rxjs';
-import { takeUntil } from 'rxjs/operators';
+import { takeUntil, finalize } from 'rxjs/operators';
 import {
   KnowledgeService,
   Source,
@@ -24,8 +24,8 @@ export class AppComponent implements OnInit, OnDestroy {
   private sanitizer = inject(DomSanitizer);
   private destroy$ = new Subject<void>();
 
-  // --- Загрузка файла ---
-  selectedFile: File | null = null;
+  // --- Загрузка файлов ---
+  selectedFiles: File[] = [];
   uploadProject = '';
   isUploading = false;
   uploadMessage = '';
@@ -182,15 +182,17 @@ export class AppComponent implements OnInit, OnDestroy {
   onFileSelected(event: Event): void {
     const input = event.target as HTMLInputElement;
     if (input.files && input.files.length > 0) {
-      this.selectedFile = input.files[0];
+      this.selectedFiles = Array.from(input.files);
     }
+    // Сбрасываем value, чтобы можно было повторно выбрать тот же файл
+    input.value = '';
   }
 
   onDrop(event: DragEvent): void {
     event.preventDefault();
     const files = event.dataTransfer?.files;
     if (files && files.length > 0) {
-      this.selectedFile = files[0];
+      this.selectedFiles = Array.from(files);
     }
   }
 
@@ -199,31 +201,36 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   upload(): void {
-    if (!this.selectedFile) {
-      this.uploadMessage = 'Выберите файл для загрузки';
+    if (this.selectedFiles.length === 0) {
+      this.uploadMessage = 'Выберите файлы для загрузки';
       return;
     }
     this.isUploading = true;
     this.uploadMessage = '';
 
     this.knowledge
-      .uploadFile(this.selectedFile, this.uploadProject)
-      .pipe(takeUntil(this.destroy$))
+      .uploadFile(this.selectedFiles, this.uploadProject)
+      .pipe(
+        takeUntil(this.destroy$),
+        // Гарантированно сбрасываем isUploading и по успеху, и по ошибке,
+        // чтобы кнопка «Загрузить» не оставалась заблокированной со спиннером.
+        finalize(() => {
+          this.isUploading = false;
+        })
+      )
       .subscribe({
         next: (res) => {
-          this.uploadMessage = `Загружено чанков: ${res.saved}`;
-          this.selectedFile = null;
+          const files = res.files ?? 1;
+          this.uploadMessage = `Загружено чанков: ${res.saved} (файлов: ${files})`;
+          this.selectedFiles = [];
           this.uploadProject = '';
           if (res.saved > 0) {
             this.loadProjects();
           }
         },
         error: (err) => {
-          this.uploadMessage = err.error?.error || 'Ошибка загрузки файла';
+          this.uploadMessage = err.error?.error || 'Ошибка загрузки файлов';
           console.error('Upload error', err);
-        },
-        complete: () => {
-          this.isUploading = false;
         }
       });
   }

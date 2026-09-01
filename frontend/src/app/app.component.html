@@ -109,15 +109,18 @@
 
       <div
         class="dropzone"
-        [class.active]="selectedFile"
+        [class.active]="selectedFiles.length"
         (dragover)="onDragOver($event)"
         (drop)="onDrop($event)"
       >
-        <p *ngIf="!selectedFile" class="dz-hint">Перетащите файл сюда<br>или</p>
-        <p *ngIf="selectedFile" class="dz-file">📄 {{ selectedFile.name }}</p>
-        <input type="file" id="fileInput" (change)="onFileSelected($event)" />
-        <label for="fileInput" class="btn-file">Выбрать файл</label>
-        <p class="hint">Поддерживаются: .txt, .md, .js, .py</p>
+        <p *ngIf="!selectedFiles.length" class="dz-hint">Перетащите файлы сюда<br>или</p>
+        <div *ngIf="selectedFiles.length" class="dz-files">
+          <p class="dz-file" *ngFor="let f of selectedFiles">📄 {{ f.name }}</p>
+          <p class="dz-count">Выбрано файлов: {{ selectedFiles.length }}</p>
+        </div>
+        <input type="file" id="fileInput" multiple (change)="onFileSelected($event)" />
+        <label for="fileInput" class="btn-file">Выбрать файлы</label>
+        <p class="hint">Поддерживаются: .txt, .md, .js, .py, .json</p>
       </div>
 
       <div class="field">
@@ -128,7 +131,7 @@
       <button
         class="btn-primary"
         (click)="upload()"
-        [disabled]="isUploading || !selectedFile"
+        [disabled]="isUploading || !selectedFiles.length"
       >
         <span *ngIf="!isUploading">Загрузить</span>
         <span *ngIf="isUploading" class="spinner" aria-label="Загрузка"></span>

@@ -26,7 +26,7 @@ const LLM_DEFAULTS = {
   // Chat-модель для ответов
   chatModel: process.env.OPENAI_CHAT_MODEL || 'gpt-4o-mini',
   // Embedding-модель для индексации и запросов
-  embeddingModel: process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small',
+  embeddingModel: process.env.OPENAI_EMBEDDING_MODEL || 'text-search-query',
   // Обязателен для YandexGPT (входит в modelUri и x-folder-id)
   yandexFolderId: process.env.YANDEX_FOLDER_ID || ''
 };
@@ -96,6 +96,7 @@ const YANDEX_EMBEDDING_MODELS = ['text-search-doc', 'text-search-query'];
 const globalKnowledge = [];
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB лимит загрузки
+const MAX_FILES = 10; // максимальное количество файлов за одну загрузку
 
 // Поддерживаемые расширения
 const TEXT_EXT = new Set(['.txt', '.md']);
@@ -170,10 +171,21 @@ function yandexHeaders() {
 }
 
 function yandexBase() {
-  return (llmConfig.baseURL && llmConfig.provider === 'yandex'
-    ? llmConfig.baseURL
-    : YANDEX_BASE
-  ).replace(/\/+$/, '');
+  // Для Яндекс-адаптера НЕ используем baseURL в формате OpenAI (…/v1, api.openai.com).
+  // Яндекс-эндпоинты фиксированы: {base}/foundationModels/v1/...
+  let base = (llmConfig.baseURL || '').trim();
+  // Нормализация: убираем хвостовые слэши и типовой суффикс версии /v1,
+  // иначе путь повторится. Используем кастомный base только если он Yandex-совместимый.
+  base = base.replace(/\/+$/, '').replace(/\/v1$/i, '');
+  if (base && /yandex|yb\.cloud|llm\.api\.cloud/i.test(base)) return base;
+  return YANDEX_BASE; // https://llm.api.cloud.yandex.net
+}
+
+function yandexEmbedUrl() {
+  return `${yandexBase()}/foundationModels/v1/textEmbedding`;
+}
+function yandexChatUrl() {
+  return `${yandexBase()}/foundationModels/v1/completion`;
 }
 
 function yandexChatUri() {
@@ -183,24 +195,73 @@ function yandexEmbedUri() {
   return `emb://${llmConfig.yandexFolderId || '${folder}'}/${llmConfig.embeddingModel}/latest`;
 }
 
-async function yandexHttpError(res) {
+async function yandexHttpError(res, modelUri) {
   let text = '';
   try {
     text = await res.text();
   } catch {
     text = '';
   }
-  throw new Error(`YandexGPT API error ${res.status}: ${text.slice(0, 500)}`);
+
+  let data = null;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = null;
+  }
+
+  const code = data?.error?.code || '';
+  const message = data?.error?.message || text.slice(0, 500);
+  const uriHint = modelUri ? ` (modelUri: "${modelUri}")` : '';
+
+  if (code === 'unsupported_country_region_territory') {
+    throw new Error(
+      'YandexGPT: регион не поддерживается (403 unsupported_country_region_territory). ' +
+        'Yandex Cloud отклоняет запросы из вашей страны/IP. Используйте VPN, прокси или ' +
+        'сервер в поддерживаемом регионе либо переключите провайдера на OpenAI-совместимый.'
+    );
+  }
+  if (res.status === 401 || code === 'invalid_api_key' || code === 'auth.failed') {
+    throw new Error('YandexGPT: неверный API-ключ (401). Проверьте ключ в настройках.');
+  }
+  if (code === 'model_not_found' || res.status === 404) {
+    throw new Error(
+      `YandexGPT: модель или Folder ID некорректны (404)${uriHint}. ` +
+        `Ответ сервера: ${message}` +
+        ' Проверьте Folder ID и имя модели. Формат URI: emb://<folder_id>/<модель>/latest. ' +
+        'Убедитесь, что в Yandex Cloud включён доступ к генеративным моделям (Foundation Models) ' +
+        'и у сервисного аккаунта есть роль для их вызова.'
+    );
+  }
+  if (res.status === 429) {
+    throw new Error('YandexGPT: превышен лимит запросов (429). Попробуйте позже.');
+  }
+  throw new Error(`YandexGPT API error ${res.status}: ${message}${uriHint}`);
+}
+
+// Возвращает понятное пользователю сообщение об ошибке (для известных случаев),
+// иначе — запасной текст.
+function friendlyError(err, fallback) {
+  if (err?.message && err.message.startsWith('YandexGPT')) return err.message;
+  return fallback;
 }
 
 // Эмбеддинг одного текста через Yandex textEmbedding
 async function yandexEmbedOne(text) {
-  const res = await fetch(`${yandexBase()}/foundationModels/v1/textEmbedding`, {
+  const modelUri = yandexEmbedUri();
+  const url = yandexEmbedUrl();
+  const body = JSON.stringify({ modelUri, text });
+  console.log(`[YandexGPT] embed → ${url}`);
+
+  const res = await fetch(url, {
     method: 'POST',
     headers: yandexHeaders(),
-    body: JSON.stringify({ modelUri: yandexEmbedUri(), text })
+    body
   });
-  if (!res.ok) await yandexHttpError(res);
+  if (!res.ok) {
+    console.log(`[YandexGPT] embed request: URL=${url} body=${body}`);
+    await yandexHttpError(res, modelUri);
+  }
   const data = await res.json();
   if (!Array.isArray(data.embedding)) throw new Error('YandexGPT: нет поля embedding в ответе');
   return data.embedding;
@@ -208,19 +269,27 @@ async function yandexEmbedOne(text) {
 
 // Ответ от YandexGPT (chat complete)
 async function yandexChat(systemPrompt, userPrompt) {
-  const res = await fetch(`${yandexBase()}/foundationModels/v1/completion`, {
+  const modelUri = yandexChatUri();
+  const url = yandexChatUrl();
+  const body = JSON.stringify({
+    modelUri,
+    completionOptions: { temperature: 0.1, maxTokens: '2000' },
+    messages: [
+      { role: 'system', text: systemPrompt },
+      { role: 'user', text: userPrompt }
+    ]
+  });
+  console.log(`[YandexGPT] chat → ${url}`);
+
+  const res = await fetch(url, {
     method: 'POST',
     headers: yandexHeaders(),
-    body: JSON.stringify({
-      modelUri: yandexChatUri(),
-      completionOptions: { temperature: 0.1, maxTokens: '2000' },
-      messages: [
-        { role: 'system', text: systemPrompt },
-        { role: 'user', text: userPrompt }
-      ]
-    })
+    body
   });
-  if (!res.ok) await yandexHttpError(res);
+  if (!res.ok) {
+    console.log(`[YandexGPT] chat request: URL=${url} body=${body.slice(0, 300)}`);
+    await yandexHttpError(res, modelUri);
+  }
   const data = await res.json();
   const text = data?.result?.alternatives?.[0]?.message?.text;
   return (text || '').trim();
@@ -305,53 +374,88 @@ const SYSTEM_PROMPT = `# AGENT.md — Системный промпт AI-асс�
  *  Роуты
  * ------------------------------------------------------------------ */
 
-// Загрузка одного файла (multipart/form-data: поле file + текстовое поле project)
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_FILE_SIZE } });
+// Загрузка одного или нескольких файлов (multipart/form-data: поле file[] + текстовое поле project)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_FILE_SIZE, files: MAX_FILES }
+});
 
-app.post('/api/upload', upload.single('file'), async (req, res) => {
+app.post('/api/upload', upload.array('file'), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'Файл не загружен (поле "file")' });
+    // req.files — массив (upload.array), req.file — одиночный (обратная совместимость)
+    const files = Array.isArray(req.files) && req.files.length
+      ? req.files
+      : (req.file ? [req.file] : []);
+
+    if (files.length === 0) {
+      return res.status(400).json({ error: 'Файлы не загружены (поле "file")' });
     }
 
     const project = (req.body.project || '').trim() || 'Без проекта';
-    const ext = path.extname(req.file.originalname).toLowerCase();
+    const results = [];
+    let totalSaved = 0;
 
-    if (!SUPPORTED_EXT.has(ext)) {
+    for (let idx = 0; idx < files.length; idx++) {
+      const f = files[idx];
+      const ext = path.extname(f.originalname).toLowerCase();
+      const base = { fileName: f.originalname };
+
+      if (!SUPPORTED_EXT.has(ext)) {
+        results.push({
+          ...base,
+          ok: false,
+          error: `Неподдерживаемый тип файла "${ext}". Поддерживаются: .txt, .md, .js, .py, .json`
+        });
+        continue;
+      }
+
+      const content = f.buffer.toString('utf8');
+      const chunks = chunkByFilename(f.originalname, content);
+
+      // ВАЖНО: пустые чанки (пустой файл) — не тратим токены на эмбеддинги
+      if (chunks.length === 0) {
+        results.push({ ...base, ok: false, error: 'Файл пустой, нечего индексировать' });
+        continue;
+      }
+
+      const vectors = await embedTexts(chunks);
+
+      const baseId = `${f.originalname}-${Date.now()}-${idx}`;
+      chunks.forEach((chunk, i) => {
+        globalKnowledge.push({
+          id: `${baseId}-${i}`,
+          project,
+          fileName: f.originalname,
+          chunkText: chunk,
+          vector: vectors[i]
+        });
+      });
+      totalSaved += chunks.length;
+      results.push({ ...base, ok: true, saved: chunks.length });
+    }
+
+    const okFiles = results.filter((r) => r.ok).length;
+
+    // Ни один файл не удалось обработать — отдаём первую ошибку, чтобы пользователь понял причину
+    if (okFiles === 0) {
+      const firstErr = results.find((r) => !r.ok);
       return res.status(400).json({
-        error: `Неподдерживаемый тип файла "${ext}". Поддерживаются: .txt, .md, .js, .py, .json`
+        error: (firstErr && firstErr.error) || 'Файл пустой, нечего индексировать'
       });
     }
 
-    const content = req.file.buffer.toString('utf8');
-    const chunks = chunkByFilename(req.file.originalname, content);
-
-    // ВАЖНО: пустые чанки (пустой файл) — не тратим токены на эмбеддинги
-    if (chunks.length === 0) {
-      return res.status(400).json({ error: 'Файл пустой, нечего индексировать' });
-    }
-
-    const vectors = await embedTexts(chunks);
-
-    const baseId = `${req.file.originalname}-${Date.now()}`;
-    chunks.forEach((chunk, i) => {
-      globalKnowledge.push({
-        id: `${baseId}-${i}`,
-        project,
-        fileName: req.file.originalname,
-        chunkText: chunk,
-        vector: vectors[i]
-      });
-    });
-
-    return res.status(200).json({ message: 'OK', saved: chunks.length });
+    return res.status(200).json({ message: 'OK', saved: totalSaved, files: okFiles, results });
   } catch (err) {
     if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
       console.error('Upload limit error:', err.message);
       return res.status(413).json({ error: 'Файл превышает лимит 5MB' });
     }
+    if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_COUNT') {
+      console.error('Upload count error:', err.message);
+      return res.status(413).json({ error: `Слишком много файлов (максимум ${MAX_FILES})` });
+    }
     console.error('Upload error:', err);
-    return res.status(500).json({ error: 'Ошибка при индексации файла' });
+    return res.status(500).json({ error: friendlyError(err, 'Ошибка при индексации файла') });
   }
 });
 
@@ -409,7 +513,7 @@ app.post('/api/query', async (req, res) => {
     return res.json({ answer, sources });
   } catch (err) {
     console.error('Query error:', err);
-    return res.status(500).json({ error: 'Ошибка при обработке запроса' });
+    return res.status(500).json({ error: friendlyError(err, 'Ошибка при обработке запроса') });
   }
 });
 

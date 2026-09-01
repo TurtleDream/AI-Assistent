@@ -19,6 +19,10 @@ export interface ProjectsResponse {
 export interface UploadResponse {
   message: string;
   saved: number;
+  /** Количество успешно обработанных файлов. */
+  files?: number;
+  /** Результат по каждому файлу (при частичном успехе/ошибках). */
+  results?: Array<{ fileName: string; ok: boolean; saved?: number; error?: string }>;
 }
 
 export type LLMProvider = 'openai' | 'yandex';
@@ -58,10 +62,10 @@ export class KnowledgeService {
   private http = inject(HttpClient);
   private baseUrl = 'http://localhost:3000/api';
 
-  /** Загрузка файла в проект (multipart/form-data). */
-  uploadFile(file: File, project: string): Observable<UploadResponse> {
+  /** Загрузка одного или нескольких файлов в проект (multipart/form-data). */
+  uploadFile(files: File[], project: string): Observable<UploadResponse> {
     const formData = new FormData();
-    formData.append('file', file, file.name);
+    files.forEach((f) => formData.append('file', f, f.name));
     formData.append('project', project || 'Без проекта');
     return this.http.post<UploadResponse>(`${this.baseUrl}/upload`, formData);
   }

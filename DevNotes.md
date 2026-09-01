@@ -1,8 +1,29 @@
 Краткий журнал ключевых изменений проекта.
 Журнал изменений
 
+2026-09-01 15:59  — v0.3 Множественная загрузка документов
 
-2026-08-31 — v0.2 Добавление возможности выбора провайдера и модели
+Область: Backend | Frontend
+
+Что изменилось:
+
+    Добавлена возможность множественной загрузки документов
+    Исправлена ошибка бесконечного
+
+Затронутые пути:
+
+    frontend/app.component.css
+    frontend/app.component.html
+    frontend/app.component.ts
+    frontend/knowledge.service.ts
+    backend/server.js
+
+Зачем / контекст:
+
+    Модель можно выбрать под свои нужды. В т. ч. использовать другого провайдера
+
+
+2026-08-31 17:52  — v0.2 Добавление возможности выбора провайдера и модели
 
 Область: Architecture | Backend | Frontend | Documentation
 
@@ -24,7 +45,7 @@
     Модель можно выбрать под свои нужды. В т. ч. использовать другого провайдера
 
 
-2026-08-31 — v0.1 (MVP) — «Просто работает»
+2026-08-31 16:49 — v0.1 (MVP) — «Просто работает»
 
 Область: Architecture | Backend | Frontend | Documentation
 
@@ -46,72 +67,3 @@
 Зачем / контекст:
 
     Реализация MVP для аппробации функционала.
-
-
-### Часть 2 — Фронтенд (`/frontend`, Angular 17 standalone)
-
-- __`knowledge.service.ts`__ — `inject(HttpClient)`, методы `uploadFile(file, project)`, `askQuestion(question, project)`, `getProjects()`. `project: null` при выборе «Все».
-
-- __`app.component.ts/html/css`__:
-
-  - Шапка с селектом проекта (значения из `/api/projects`, опция «Все»).
-  - Сайдбар: drag-and-drop зона + кнопка выбора файла + инпут имени проекта.
-  - Основная область: поле вопроса + кнопка «Спросить».
-  - Ответ с простым markdown-форматированием (код-блоки ``` → `<pre><code>`, безопасный эскейп перед `bypassSecurityTrustHtml`).
-  - Блок «Источники» с именем файла и цитатой.
-  - Спиннеры (лоадеры) при загрузке файла и при ответе AI.
-
-- Каркас CLI-проекта: `angular.json`, `tsconfig*.json`, `main.ts`, `index.html`, `app.config.ts` (с `provideHttpClient()`).
-
-## Проверка (выполнено)
-
-- Backend: `node --check` — синтаксис OK; сервер стартует; smoke-тест `/api/projects` → `{"projects":[]}` и пустой запрос → `{"answer":"Нет загруженных данных","sources":[]}`. ✅
-- Frontend: `npm install` (513 пакетов) + `ng build` — __«Application bundle generation complete»__, все строгие проверки TypeScript и шаблонов (`strictTemplates`) пройдены. ✅
-- Плюс `.gitignore` (исключает `node_modules`, `dist`, `.env`, логи).
-
-## Как запустить
-
-1. `backend/.env` → вставьте `OPENAI_API_KEY`.
-2. `cd backend; npm start` → [](http://localhost:3000)<http://localhost:3000>
-3. `cd frontend; npm start` → [](http://localhost:4200)<http://localhost:4200> (бэк подключается к 3000 через CORS).
-
-## Ограничения MVP
-
-- Хранилище in-memory: при перезапуске бэкенда данные сбрасываются — это ожидаемо для v0.1.
-- Полный поток с OpenAI (эмбеддинги + `gpt-4o-mini`) невозможно прогнать без вашего API-ключа; код использует точный требуемый SDK-интерфейс `embeddings.create({ model: 'text-embedding-3-small', input: batch })` и `chat.completions.create`.
-
-## v02 (MVP) — Поддержка разных моделей
-
-## Что добавлено
-
-### Бэкенд (`backend/server.js`)
-
-Конфигурация LLM теперь хранится __в памяти__ (с fallback на `.env`) и поддерживает разные модели и API-провайдеры через `POST /api/config`:
-
-- __`baseURL`__ — для OpenAI-совместимых API (OpenRouter, Groq, DeepSeek и т.д.).
-- __`apiKey`__ — задаётся в интерфейсе (если пусто — берётся из `.env`).
-- __`chatModel`__ и __`embeddingModel`__ — выбираются отдельно.
-
-Клиент OpenAI создаётся динамически через `getClient()`/`createClient()` под текущую конфигурацию (кэш + `resetClient()` после сохранения). `embedTexts` и `/api/query` теперь используют выбранные модели вместо захардкоженных.
-
-__Новые эндпоинты:__
-
-- `GET /api/config` — текущая конфигурация; ключ __никогда не возвращается открыто__, только `hasApiKey` + маска (`sk-…1234`).
-- `POST /api/config` — сохранение `{ baseURL?, apiKey?, chatModel?, embeddingModel? }`; пустой ключ/болванка `••••••••` не затирают существующий.
-- `GET /api/models` — подсказки по известным чат-моделям (gpt, deepseek, claude…) и embedding-моделям.
-
-`backend/.env.example` обновлён с новыми переменными.
-
-### Фронтенд (`frontend`)
-
-- __`knowledge.service.ts`__ — добавлены `getConfig()`, `saveConfig(payload)`, `getModels()` + интерфейсы `LLMConfig`, `ConfigResponse`, `SaveConfigPayload`, `ModelsResponse`.
-
-- __`app.component.ts`__ — состояние настроек, `loadConfig()`, `toggleSettings()`, `saveConfig()`; ключ отправляется на сервер, только если пользователь реально ввёл новый.
-
-- __Шаблон/стили__ — кнопка __«⚙️ Настройки AI»__ в шапке открывает панель с полями:
-
-  - Base URL (провайдер),
-  - API-ключ (поле `type="password"`, показывается маска уже сохранённого ключа),
-  - Chat-модель (input + `datalist` с подсказками, можно ввести свою),
-  - Embedding-модель (аналогично),
-  - Кнопки «Сохранить» (с лоадером) / «Закрыть», а также предупреждение, если ключ не задан.
