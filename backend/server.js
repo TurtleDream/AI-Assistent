@@ -137,6 +137,25 @@ function migrateSchema() {
       value TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS tags (
+      id   INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE
+    );
+
+    CREATE TABLE IF NOT EXISTS doc_tags (
+      doc_id INTEGER NOT NULL,
+      tag_id INTEGER NOT NULL,
+      PRIMARY KEY (doc_id, tag_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS document_relations (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_id  INTEGER NOT NULL,
+      target_id  INTEGER NOT NULL,
+      similarity REAL NOT NULL DEFAULT 0,
+      createdAt  TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_documents_project ON documents(project);
     CREATE INDEX IF NOT EXISTS idx_documents_path ON documents(path);
     CREATE INDEX IF NOT EXISTS idx_chunks_project ON chunks(project);
@@ -813,15 +832,26 @@ app.post('/api/query', async (req, res) => {
       return res.json({ answer: 'Нет загруженных данных', sources: [] });
     }
 
-    // 2. Достаём чанки из SQLite (векторы хранятся как TEXT-JSON → парсим позже).
-    //    Если указан проект — фильтруем на уровне SQL по индексу idx_chunks_project.
+    // 2. Достаём чанки из SQLite через JOIN документов (векторы хранятся как
+    //    TEXT-JSON → парсим позже). Если указан проект — фильтруем на уровне SQL.
     let rows;
     if (project) {
       rows = db
-        .prepare('SELECT id, project, fileName, chunkText, vector FROM chunks WHERE project = ?')
+        .prepare(
+          `SELECT c.id, c.project, c.fileName, c.chunkText, c.vector
+           FROM chunks c
+           JOIN documents d ON d.id = c.document_id
+           WHERE d.project = ?`
+        )
         .all(project);
     } else {
-      rows = db.prepare('SELECT id, project, fileName, chunkText, vector FROM chunks').all();
+      rows = db
+        .prepare(
+          `SELECT c.id, c.project, c.fileName, c.chunkText, c.vector
+           FROM chunks c
+           JOIN documents d ON d.id = c.document_id`
+        )
+        .all();
     }
     if (rows.length === 0) {
       return res.json({ answer: 'Не нашел информации в этом проекте', sources: [] });
@@ -861,6 +891,230 @@ app.post('/api/query', async (req, res) => {
   } catch (err) {
     console.error('Query error:', err);
     return res.status(500).json({ error: friendlyError(err, 'Ошибка при обработке запроса') });
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ *  Хелперы для AI-функций (теги, связи, диаграммы)
+ * ------------------------------------------------------------------ */
+
+function parseTags(text) {
+  return (text || '')
+    .split(',')
+    .map((t) => t.trim().replace(/^#+/, ''))
+    .filter((t) => t.length > 0 && t.length <= 40)
+    .slice(0, 5);
+}
+
+function fallbackTags(text) {
+  const words = String(text || '')
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .map((w) => w.trim())
+    .filter((w) => w.length >= 5 && w.length <= 25);
+  const stop = new Set(['который', 'которая', 'которое', 'которые', 'чтобы', 'также', 'если', 'этот', 'это', 'того', 'что', 'для', 'при']);
+  const count = {};
+  for (const w of words) {
+    if (stop.has(w)) continue;
+    count[w] = (count[w] || 0) + 1;
+  }
+  return Object.entries(count)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([w]) => w);
+}
+
+function fallbackMermaid(title) {
+  const id = (String(title || 'document')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '_')
+    .replace(/^_+|_+$/g, '') || 'document');
+  return 'flowchart LR\n  A[' + id + ']';
+}
+
+/* ------------------------------------------------------------------ *
+ *  POST /api/suggest-links — предлагает похожие документы (связи).
+ *  Вычисляет косинусное сходство между doc_vector документов.
+ * ------------------------------------------------------------------ */
+app.post('/api/suggest-links', async (req, res) => {
+  try {
+    const { docId } = req.body || {};
+    if (!docId) return res.status(400).json({ error: 'Не указан docId' });
+
+    const source = db.prepare('SELECT * FROM documents WHERE id = ?').get(Number(docId));
+    if (!source) return res.status(404).json({ error: 'Документ не найден' });
+
+    const srcVector = source.doc_vector ? JSON.parse(source.doc_vector) : null;
+    if (!srcVector || srcVector.length === 0) {
+      return res.json({ suggestions: [], message: 'У документа нет вектора для сравнения' });
+    }
+
+    // Уже подтверждённые связи этого документа (чтобы не предлагать повторно)
+    const linked = db
+      .prepare(
+        'SELECT target_id FROM document_relations WHERE source_id = ? UNION SELECT source_id FROM document_relations WHERE target_id = ?'
+      )
+      .all(Number(docId), Number(docId))
+      .map((r) => Number(r.target_id || r.source_id));
+
+    const rows = db.prepare('SELECT id, fileName, project, doc_vector FROM documents').all();
+    const suggestions = [];
+    for (const row of rows) {
+      const id = Number(row.id);
+      if (id === Number(docId)) continue;
+      if (linked.includes(id)) continue;
+      const v = row.doc_vector ? JSON.parse(row.doc_vector) : null;
+      const score = cosineSimilarity(srcVector, v);
+      if (score <= 0) continue;
+      suggestions.push({
+        docId: String(id),
+        fileName: row.fileName,
+        project: row.project,
+        similarity: Math.round(score * 10000) / 100
+      });
+    }
+
+    suggestions.sort((a, b) => b.similarity - a.similarity);
+    return res.json({ suggestions: suggestions.slice(0, 5) });
+  } catch (err) {
+    console.error('Suggest-links error:', err);
+    return res.status(500).json({ error: friendlyError(err, 'Ошибка при поиске связей') });
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ *  POST /api/apply-link — сохраняет подтверждённую связь в document_relations.
+ * ------------------------------------------------------------------ */
+app.post('/api/apply-link', async (req, res) => {
+  try {
+    const { docId, targetId, similarity } = req.body || {};
+    const sourceId = Number(docId);
+    const target = Number(targetId);
+    if (!sourceId || !target) {
+      return res.status(400).json({ error: 'Не указаны docId и targetId' });
+    }
+    if (sourceId === target) {
+      return res.status(400).json({ error: 'Нельзя связать документ с самим собой' });
+    }
+
+    const exists = db
+      .prepare('SELECT id FROM document_relations WHERE source_id = ? AND target_id = ?')
+      .get(sourceId, target);
+    if (exists) {
+      return res.json({ ok: true, alreadyExists: true });
+    }
+
+    db.prepare(
+      `INSERT INTO document_relations (source_id, target_id, similarity, createdAt)
+       VALUES (?, ?, ?, ?)`
+    ).run(sourceId, target, Number(similarity) || 0, new Date().toISOString());
+
+    return res.json({ ok: true, alreadyExists: false });
+  } catch (err) {
+    console.error('Apply-link error:', err);
+    return res.status(500).json({ error: friendlyError(err, 'Ошибка при сохранении связи') });
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ *  POST /api/suggest-tags — генерирует теги через GPT по первым 3 чанкам.
+ *  Сохраняет теги в tags + связывает через doc_tags (существующие переиспользует).
+ * ------------------------------------------------------------------ */
+app.post('/api/suggest-tags', async (req, res) => {
+  try {
+    const { docId } = req.body || {};
+    if (!docId) return res.status(400).json({ error: 'Не указан docId' });
+
+    const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(Number(docId));
+    if (!doc) return res.status(404).json({ error: 'Документ не найден' });
+
+    // Первые 3 чанка документа
+    const chunks = db
+      .prepare('SELECT chunkText FROM chunks WHERE document_id = ? ORDER BY chunk_index LIMIT 3')
+      .all(Number(docId));
+    const text = chunks.map((c) => c.chunkText).join('\n').slice(0, 4000);
+
+    let tags = [];
+    try {
+      const userPrompt =
+        'Сгенерируй 3-5 ключевых тегов (слова или короткие фразы) для следующего текста. ' +
+        'Верни только теги через запятую, без номеров, кавычек и пояснений.\n\nТекст:\n' + text;
+      const answer = await generateAnswer(SYSTEM_PROMPT, userPrompt);
+      tags = parseTags(answer);
+    } catch (err) {
+      console.error('Suggest-tags (GPT) fallback:', err.message);
+      tags = fallbackTags(text);
+    }
+    if (tags.length === 0) tags = fallbackTags(text);
+
+    // Сохранение: тег → tags (UNIQUE), связь → doc_tags
+    const insertTag = db.prepare(
+      'INSERT INTO tags (name) VALUES (?) ON CONFLICT(name) DO NOTHING'
+    );
+    const insertRel = db.prepare(
+      'INSERT OR IGNORE INTO doc_tags (doc_id, tag_id) VALUES (?, ?)'
+    );
+    const saved = [];
+    for (const rawTag of tags) {
+      const name = rawTag.toLowerCase();
+      insertTag.run(name);
+      const row = db.prepare('SELECT id FROM tags WHERE name = ?').get(name);
+      if (row) {
+        insertRel.run(Number(docId), Number(row.id));
+        saved.push(name);
+      }
+    }
+
+    return res.json({ tags: saved, filtered: Boolean(saved.length < tags.length) });
+  } catch (err) {
+    console.error('Suggest-tags error:', err);
+    return res.status(500).json({ error: friendlyError(err, 'Ошибка при генерации тегов') });
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ *  POST /api/generate-diagram — генерирует Mermaid-код через GPT.
+ *  Принимает docId ИЛИ текст описания.
+ * ------------------------------------------------------------------ */
+app.post('/api/generate-diagram', async (req, res) => {
+  try {
+    const { docId, description } = req.body || {};
+
+    let text = (description || '').toString().trim();
+    if (!text && docId) {
+      const chunks = db
+        .prepare('SELECT chunkText FROM chunks WHERE document_id = ? ORDER BY chunk_index LIMIT 5')
+        .all(Number(docId));
+      text = chunks.map((c) => c.chunkText).join('\n').slice(0, 4000);
+    }
+
+    if (!text) return res.status(400).json({ error: 'Укажите docId или description' });
+
+    try {
+      const userPrompt =
+        'Ты — архитектор. По описанию ниже создай код диаграммы в формате Mermaid ' +
+        '(например, flowchart или classDiagram). Верни только код Mermaid без пояснений и без markdown-обёртки.\n\n' +
+        'Описание:\n' + text;
+      const answer = await generateAnswer(SYSTEM_PROMPT, userPrompt);
+
+      let mermaid = (answer || '').trim();
+      mermaid = mermaid.replace(/^```(mermaid)?\s*/i, '').replace(/```$/, '').trim();
+
+      if (!/^(flowchart|graph|classDiagram|sequenceDiagram|stateDiagram|erDiagram|gantt)/.test(mermaid)) {
+        throw new Error('Ответ модели не похож на Mermaid-код');
+      }
+
+      return res.json({ mermaid });
+    } catch (err) {
+      console.error('Generate-diagram (GPT) fallback:', err.message);
+      return res.status(200).json({
+        mermaid: fallbackMermaid(docId ? `doc_${docId}` : ''),
+        fallback: true
+      });
+    }
+  } catch (err) {
+    console.error('Generate-diagram error:', err);
+    return res.status(500).json({ error: friendlyError(err, 'Ошибка при генерации диаграммы') });
   }
 });
 

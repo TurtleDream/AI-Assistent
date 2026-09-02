@@ -10,6 +10,7 @@
 **Knowledge Weaver** — MVP (v0.1) RAG-ассистент для работы с заметками и кодом.
 - Пользователь грузит файлы (.txt, .md, .js, .py, .json) в «проекты» ИЛИ сканирует локальную папку (файлы индексируются в проект «Локальная папка»).
 - Бэкенд нарезает на чанки → эмбеддинги → векторный поиск по косинусному сходству → ответ LLM с источниками.
+- AI-функции: предложение **связей** между документами и сохранение их истории, GPT-генерация **тегов** (persist в `tags`/`doc_tags`), генерация **Mermaid-диаграмм**.
 - Ключевая фича: деление по **проектам**, фильтр в UI + **работа с локальной файловой системой** (вместо ручного аплоада файлов).
 
 ## 2. Стек (строго соблюдать)
@@ -49,10 +50,13 @@
 
 ### Хранилище записей (SQLite via `node:sqlite`)
 - **SQLite** (встроенный `DatabaseSync`, Node.js 22.5+): открывается при старте сервера в `./db/knowledge.sqlite` (в 22.x требуется флаг `--experimental-sqlite`; с v23.4+ — без флага). Импорт: `import { DatabaseSync } from 'node:sqlite'`.
-- **Таблица `documents`**: `id INTEGER PK AUTOINCREMENT`, `project`, `fileName`, `ext`, `fileSize`, `chunkCount`, `doc_vector TEXT` (усреднённый вектор документа, JSON-строка), `createdAt`.
+- **Таблица `documents`**: `id INTEGER PK AUTOINCREMENT`, `project`, `fileName`, `ext`, `fileSize`, `chunkCount`, `doc_vector TEXT` (усреднённый вектор документа, JSON-строка), `createdAt`, `path` (для локального сканирования; у ручной загрузки — пусто).
 - **Таблица `chunks`**: `id TEXT PK`, `document_id INTEGER → documents(id) ON DELETE CASCADE`, `project`, `fileName`, `chunk_index`, `chunkText`, `vector TEXT` (JSON-строка вектора чанка). Индексы по `project` (обе таблицы) и `document_id`.
+- **Таблица `tags`**: `id INTEGER PK AUTOINCREMENT`, `name TEXT UNIQUE` (теги, переиспользуются между документами).
+- **Таблица `doc_tags`**: связь многие-ко-многим `(doc_id, tag_id)` PK из двух id.
+- **Таблица `document_relations`**: история подтверждённых связей `{ id, source_id, target_id, similarity REAL, createdAt }` (чтобы не предлагать связи повторно).
 - `openDatabase()` — открывает БД и выполняет миграцию `CREATE TABLE IF NOT EXISTS` при старте.
-- Поиск/фильтр по проекту идут **SQL-запросами** (`SELECT ... FROM chunks WHERE project = ?`); векторы десериализуются через `JSON.parse`, сходство — `cosineSimilarity()`.
+- Поиск/фильтр по проекту — **SQL-запросами через JOIN**: `SELECT ... FROM chunks c JOIN documents d ON d.id = c.document_id WHERE d.project = ?`; векторы десериализуются через `JSON.parse`, сходство — `cosineSimilarity()`.
 - `llmConfig` + дефолты из env: `{ provider, baseURL, apiKey, chatModel, embeddingModel, yandexFolderId }`.
   - Провайдер: `'openai' | 'yandex'`.
   - OpenAI-дефолты: baseURL `https://api.openai.com/v1`, chat `gpt-4o-mini`, emb `text-embedding-3-small`.
@@ -68,6 +72,9 @@
 - `embedTexts(texts)` — батчи по `EMBEDDING_BATCH` (8); для yandex — по одному (`yandexEmbedOne`).
 - `generateAnswer(system, user)` — выбирает `yandexChat()` или `openaiChat()` по провайдеру.
 - `averageVectors(vectors)` — усреднённый вектор для `documents.doc_vector`.
+- `parseTags(text)` — парсит ответ GPT (через запятую → массив, без `#`, ≤ 5 шт).
+- `fallbackTags(text)` — fallback-теги частотным анализом слов (без стоп-слов), если GPT недоступен/пуст.
+- `fallbackMermaid(title)` — fallback `flowchart LR` для диаграммы, если GPT недоступен.
 - `openDatabase()` — открывает SQLite и мигрирует схему; `clearAllFromDb()` — `DELETE` из таблиц (каскадно вместе с чанками). Используется в `DELETE /api/clear`.
 - Yandex-адаптер: `yandexHeaders()`, `yandexBase()`, `yandexEmbedUrl()`, `yandexChatUrl()`, `yandexChatUri()`, `yandexEmbedUri()`, `yandexHttpError(res, modelUri)`, `friendlyError(err, fallback)`.
 - Endpoint: `https://llm.api.cloud.yandex.net/foundationModels/v1/{textEmbedding|completion}`.
@@ -80,6 +87,10 @@
 |---|---|---|---|
 | POST | `/api/upload` | multipart `file[]` (несколько) + field `project` (мульти-загрузка, до 10 файлов) | `{ message, saved, files, results: [{ fileName, ok, saved?, error? }] }` |
 | POST | `/api/query` | `{ question, project? }` | `{ answer, sources: [{ fileName, chunkText }] }` |
+| POST | `/api/suggest-links` | `{ docId }` | `{ suggestions: [{ docId, fileName, project, similarity(%) }] }` — топ-5 похожих по `doc_vector` |
+| POST | `/api/apply-link` | `{ docId, targetId, similarity? }` | `{ ok, alreadyExists }` — сохраняет связь в `document_relations` |
+| POST | `/api/suggest-tags` | `{ docId }` | `{ tags: string[], filtered }` — GPT-теги по первым 3 чанкам, сохранены в `tags`+`doc_tags` |
+| POST | `/api/generate-diagram` | `{ docId? , description? }` | `{ mermaid, fallback? }` — Mermaid-код от GPT |
 | GET | `/api/projects` | — | `{ projects: string[] }` |
 | DELETE | `/api/clear` | — | `{ ok, cleared }` — очищает всю БД (LevelDB + in-memory; полезно для тестирования) |
 | GET | `/api/stats` | — | `{ chunkCount, fileCount, projects }` |
@@ -89,10 +100,16 @@
 
 ### Логика `/api/query`
 1. Пустая база → `{ answer: "Нет загруженных данных" }`.
-2. Фильтр по `project` (если указан); нет чанков → «Не нашел информации в этом проекте».
+2. Чанки через `JOIN documents d ON d.id = c.document_id`, фильтр по `d.project` (если указан); нет чанков → «Не нашел информации в этом проекте».
 3. Эмбеддинг вопроса.
 4. Сортировка по сходству, топ-3 c порогом `> 0.5`; ниже порога → без вызова GPT.
 5. Иначе собрать контекст → `generateAnswer(SYSTEM_PROMPT, userPrompt)` → `{ answer, sources }`.
+
+### AI-функции (связи, теги, диаграммы)
+- **`/api/suggest-links`** — `doc_vector` документа vs остальных; `cosineSimilarity`; исключает уже сохранённые в `document_relations` и сам документ; топ-5 с `similarity` в % (округл. до 2 знаков). Нет вектора → `{ suggestions: [], message }`.
+- **`/api/apply-link`** — вставка в `document_relations`; защита от дублей (`alreadyExists`) и самосвязи.
+- **`/api/suggest-tags`** — строки первых 3 чанков → GPT «Верни только теги через запятую» → `parseTags`; сохранение: `INSERT ... ON CONFLICT(name) DO NOTHING` (переиспользование) + `doc_tags`. GPT-ошибка/пусто → `fallbackTags`.
+- **`/api/generate-diagram`** — по `docId` (первые 5 чанков) или `description` → GPT «Верни только Mermaid» → чистит ```mermaid```-обёртку и валидирует префикс; ошибка → `fallbackMermaid` с `fallback: true`.
 
 ### Обработка ошибок
 - Все роуты `async/await` в `try/catch`, логируют в консоль.

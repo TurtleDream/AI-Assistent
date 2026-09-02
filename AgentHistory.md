@@ -254,3 +254,36 @@ __Компонент__ (`app.component.ts/html/css`):
 - __`app.component.ts`__: загрузка заменена на сканирование (`workspacePath`, `isScanning`, `scanProgress`, `scanMessage`, `scanErrors`); `startScan()` → setWorkspace → scan → поллинг прогресса каждые 600 мс через `interval()`; `stopScanPolling()` через `finalize` и маркер `scanPollStop$`.
 - __`app.component.html`__: дроп-зона заменена на инпут пути + кнопку «📁 Отсканировать папку» + прогресс-бар, счётчик «Обработано X/Y · Новых: N», текущий файл и счётчик ошибок.
 - __`app.component.css`__: добавлены стили `.scan-progress`, `.progress-track/fill/meta/current`, `.error`.
+
+
+## Что сделано
+
+Я изучил `Skills.md` и `CONTEXT.md` (проект Knowledge Weaver: Node ≥20 + Express + OpenAI SDK + SQLite через `node:sqlite`, единый `backend/server.js`), затем внёс изменения строго в существующий стиль кода.
+
+### 1. Миграция БД (`migrateSchema()`)
+
+Добавил 3 таблицы: `tags` (name UNIQUE), `doc_tags` (связь doc↔tag, PK из двух id), `document_relations` (история подтверждённых связей с `similarity` и `createdAt`).
+
+### 2. Обновлён `POST /api/query` (RAG)
+
+Теперь чанки достаются через `JOIN documents d ON d.id = c.document_id` и фильтруются по `d.project = ?` (как требовалось в задании), а не по `chunks.project`.
+
+### 3. `POST /api/suggest-links`
+
+Берёт `doc_vector` документа по `docId`, выбирает все остальные из `documents`, вычисляет косинусное сходство через `JSON.parse` + существующую функцию `cosineSimilarity()`. Исключает уже подтверждённые связи (из `document_relations`) и сам документ. Возвращает топ-5 с `fileName` и `similarity` (%). Порог `> 0` — включает все валидные, сортировка по убыванию.
+
+### 4. `POST /api/apply-link`
+
+Сохраняет связь (`source_id`, `target_id`, `similarity`, `createdAt`) в `document_relations`. Проверяет, что связь ещё не существует, и запрещает связывать документ с самим собой.
+
+### 5. `POST /api/suggest-tags`
+
+Берёт текст первых 3 чанков, шлёт в GPT промпт «Сгенерируй 3-5 ключевых тегов… Верни только теги через запятую», парсит через `parseTags`, сохраняет в `tags` (`ON CONFLICT(name) DO NOTHING` — переиспользование существующих) и связывает через `doc_tags`. При ошибке GPT или пустом результате — fallback `fallbackTags()` (частотный анализ слов текста) через try/catch.
+
+### 6. `POST /api/generate-diagram`
+
+Принимает `docId` или `description`. Отправляет в GPT промпт «Ты — архитектор… Верни только код Mermaid», очищает markdown-обёртку `mermaid` и проверяет, что ответ — корректный Mermaid. При ошибке/невалидном ответе возвращает fallback `flowchart LR` (название узла — `doc_<id>` или `document`) с флагом `fallback: true`.
+
+Все запросы к GPT идут асинхронно через существующий `generateAnswer()` (поддерживает OpenAI и YandexGPT-адаптер), а для тегов и схем добавлены `try/catch` и fallback-значения.
+
+Далее на фронте останется: добавить методы в `knowledge.service.ts` и UI-кнопки в `app.component` — но это уже выходит за рамки поставленного (бэкенд) задания.
