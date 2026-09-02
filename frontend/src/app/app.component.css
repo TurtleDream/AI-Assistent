@@ -584,3 +584,42 @@
   background: #059669;
   color: #fff;
 }
+
+/* ---------- Прогресс сканирования ---------- */
+.scan-progress {
+  margin-top: 16px;
+}
+
+.progress-track {
+  height: 8px;
+  background: #e5e7eb;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: #3b82f6;
+  border-radius: 999px;
+  transition: width 0.2s ease;
+}
+
+.progress-meta {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #475569;
+  font-weight: 600;
+}
+
+.progress-current {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: #94a3b8;
+  word-break: break-all;
+}
+
+.error {
+  font-size: 13px;
+  color: #b91c1c;
+  margin-top: 10px;
+}

@@ -6,6 +6,7 @@ import path from 'path';
 import fs from 'fs';
 import dotenv from 'dotenv';
 import { DatabaseSync } from 'node:sqlite';
+import fg from 'fast-glob';
 
 dotenv.config();
 
@@ -116,7 +117,8 @@ function migrateSchema() {
       fileSize   INTEGER NOT NULL DEFAULT 0,
       chunkCount INTEGER NOT NULL DEFAULT 0,
       doc_vector TEXT,
-      createdAt  TEXT NOT NULL
+      createdAt  TEXT NOT NULL,
+      path       TEXT NOT NULL DEFAULT ''
     );
 
     CREATE TABLE IF NOT EXISTS chunks (
@@ -130,7 +132,13 @@ function migrateSchema() {
       FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS settings (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_documents_project ON documents(project);
+    CREATE INDEX IF NOT EXISTS idx_documents_path ON documents(path);
     CREATE INDEX IF NOT EXISTS idx_chunks_project ON chunks(project);
     CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
   `);
@@ -223,6 +231,86 @@ function averageVectors(vectors) {
     for (let d = 0; d < dims; d++) sum[d] += v[d];
   }
   return sum.map((x) => x / vectors.length);
+}
+
+/* ------------------------------------------------------------------ *
+ *  Настройки приложения (ключ → значение в таблице settings)
+ * ------------------------------------------------------------------ */
+function getSetting(key) {
+  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+  return row ? row.value : null;
+}
+
+function setSetting(key, value) {
+  db.prepare(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ' +
+      'ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+  ).run(key, value);
+}
+
+// Нормализация пути рабочей папки: абсолютный путь, виндовые слэши → прямые
+// (fast-glob и сравнение по path работают с прямыми слэшами).
+function normalizeWorkspacePath(p) {
+  return path.resolve(String(p).trim()).replace(/\\/g, '/');
+}
+
+/* ------------------------------------------------------------------ *
+ *  Индексация контента файла (общий хелпер для upload и scan)
+ * ------------------------------------------------------------------ */
+// Принимает готовый контент файла; чанкует, генерит эмбеддинги и сохраняет
+// документ + чанки в БД. Если по filePath уже есть документ — пропускает.
+async function indexContent({ project, fileName, ext, fileSize, content, filePath }) {
+  const chunks = chunkByFilename(fileName, content);
+  if (chunks.length === 0) {
+    const e = new Error('Файл пустой, нечего индексировать');
+    e.empty = true;
+    throw e;
+  }
+
+  // Дубликат по абсолютному пути (для scan). У загруженных через UI файлов
+  // path пустой, поэтому проверка не мешает повторной ручной загрузке.
+  const existing = db
+    .prepare('SELECT id FROM documents WHERE path = ? AND path != \'\' LIMIT 1')
+    .get(filePath || '');
+  if (existing) return { saved: 0, skipped: true, chunkCount: 0 };
+
+  const vectors = await embedTexts(chunks);
+  const docVector = averageVectors(vectors);
+
+  const insertDoc = db.prepare(
+    `INSERT INTO documents (project, fileName, ext, fileSize, chunkCount, doc_vector, createdAt, path)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  const insertChunk = db.prepare(
+    `INSERT INTO chunks (id, document_id, project, fileName, chunk_index, chunkText, vector)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  );
+
+  const docResult = insertDoc.run(
+    project,
+    fileName,
+    ext,
+    fileSize,
+    chunks.length,
+    JSON.stringify(docVector),
+    new Date().toISOString(),
+    filePath || ''
+  );
+  const documentId = Number(docResult.lastInsertRowid);
+
+  const baseId = `${fileName}-${Date.now()}-${documentId}`;
+  for (let i = 0; i < chunks.length; i++) {
+    insertChunk.run(
+      `${baseId}-${i}`,
+      documentId,
+      project,
+      fileName,
+      i,
+      chunks[i],
+      JSON.stringify(vectors[i])
+    );
+  }
+  return { saved: chunks.length, skipped: false, chunkCount: chunks.length };
 }
 
 /* ------------------------------------------------------------------ *
@@ -441,6 +529,143 @@ const SYSTEM_PROMPT = `# AGENT.md — Системный промпт AI-асс�
 /* ------------------------------------------------------------------ *
  *  Роуты
  * ------------------------------------------------------------------ */
+
+// Текущее состояние фонового сканирования (для отображения прогресса в UI).
+let scanState = {
+  running: false,
+  total: 0,
+  processed: 0,
+  newIndexed: 0,
+  errors: [],
+  current: ''
+};
+
+// Задание папки для локального сканирования (хранится в таблице settings).
+app.post('/api/set-workspace', async (req, res) => {
+  try {
+    const raw = (req.body && req.body.folderPath) || '';
+    const folderPath = normalizeWorkspacePath(raw);
+    if (!folderPath) {
+      return res.status(400).json({ error: 'Не указан путь к папке (folderPath)' });
+    }
+    if (!fs.existsSync(folderPath)) {
+      return res.status(400).json({ error: 'Папка не найдена на диске' });
+    }
+    const stat = fs.statSync(folderPath);
+    if (!stat.isDirectory()) {
+      return res.status(400).json({ error: 'Указанный путь не является папкой' });
+    }
+    setSetting('workspacePath', folderPath);
+    console.log(`[scan] Рабочая папка установлена: ${folderPath}`);
+    return res.json({ ok: true, folderPath });
+  } catch (err) {
+    console.error('Set-workspace error:', err);
+    return res.status(500).json({ error: 'Ошибка при установке папки' });
+  }
+});
+
+// Рекурсивный обход рабочей папки и индексация новых файлов.
+// Расширения: .md, .txt, .js, .py, .json (текст → 500 символов, код → 20 строк).
+const SCAN_EXT = ['md', 'txt', 'js', 'py', 'json'];
+const SCAN_IGNORE = ['**/node_modules/**', '**/.git/**'];
+
+app.get('/api/scan', async (req, res) => {
+  try {
+    if (scanState.running) {
+      return res.status(409).json({ error: 'Сканирование уже выполняется' });
+    }
+
+    const workspace = getSetting('workspacePath');
+    if (!workspace) {
+      return res.status(400).json({ error: 'Сначала укажите папку в настройках' });
+    }
+    if (!fs.existsSync(workspace)) {
+      return res.status(400).json({ error: 'Рабочая папка больше не существует' });
+    }
+
+    // Собираем все файлы нужных расширений (абсолютные пути, прямые слэши).
+    const paths = fg.sync(`**/*.{${SCAN_EXT.join(',')}}`, {
+      cwd: workspace,
+      absolute: true,
+      onlyFiles: true,
+      dot: false,
+      ignore: SCAN_IGNORE
+    });
+
+    scanState.running = true;
+    scanState.total = paths.length;
+    scanState.processed = 0;
+    scanState.newIndexed = 0;
+    scanState.errors = [];
+    scanState.current = '';
+
+    const errors = [];
+    let newIndexed = 0;
+
+    for (let i = 0; i < paths.length; i++) {
+      const p = paths[i];
+      scanState.processed = i + 1;
+      scanState.current = p;
+      try {
+        // Пропускаем уже проиндексированные файлы (по абсолютному path).
+        const existing = db
+          .prepare('SELECT id FROM documents WHERE path = ? LIMIT 1')
+          .get(p);
+        if (existing) continue;
+
+        const [content, fileStat] = await Promise.all([
+          fs.promises.readFile(p, 'utf8'),
+          fs.promises.stat(p)
+        ]);
+
+        const fileName = path.basename(p);
+        const ext = path.extname(p).toLowerCase();
+
+        const result = await indexContent({
+          project: 'Локальная папка',
+          fileName,
+          ext,
+          fileSize: fileStat.size,
+          content,
+          filePath: p
+        });
+
+        if (result.saved > 0) {
+          newIndexed++;
+          scanState.newIndexed = newIndexed;
+        }
+      } catch (err) {
+        const msg = err && err.message ? err.message : String(err);
+        errors.push({ file: p, error: msg });
+        scanState.errors = errors;
+      }
+    }
+
+    scanState.running = false;
+    scanState.current = '';
+    console.log(`[scan] Готово: просканировано ${paths.length}, новых ${newIndexed}, ошибок ${errors.length}`);
+    return res.json({ totalScanned: paths.length, newIndexed, errors });
+  } catch (err) {
+    scanState.running = false;
+    console.error('Scan error:', err);
+    return res.status(500).json({ error: friendlyError(err, 'Ошибка при сканировании папки') });
+  }
+});
+
+// Прогресс фонового сканирования (опрашивается UI каждые ~500мс).
+app.get('/api/scan/progress', async (req, res) => {
+  return res.json({
+    running: scanState.running,
+    total: scanState.total,
+    processed: scanState.processed,
+    newIndexed: scanState.newIndexed,
+    errors: scanState.errors,
+    current: scanState.current,
+    percent: scanState.total
+      ? Math.min(100, Math.round((scanState.processed / scanState.total) * 100))
+      : 0
+  });
+});
 
 // Загрузка одного или нескольких файлов (multipart/form-data: поле file[] + текстовое поле project)
 const upload = multer({

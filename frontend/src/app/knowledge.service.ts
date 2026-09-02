@@ -86,6 +86,33 @@ export interface SuggestResponse {
   all?: DocSuggestions[];
 }
 
+// --- Работа с локальной файловой системой ---
+export interface SetWorkspaceResponse {
+  ok: boolean;
+  folderPath: string;
+}
+
+export interface ScanError {
+  file: string;
+  error: string;
+}
+
+export interface ScanResult {
+  totalScanned: number;
+  newIndexed: number;
+  errors: ScanError[];
+}
+
+export interface ScanProgress {
+  running: boolean;
+  total: number;
+  processed: number;
+  newIndexed: number;
+  errors: ScanError[];
+  current: string;
+  percent: number;
+}
+
 @Injectable({ providedIn: 'root' })
 export class KnowledgeService {
   private http = inject(HttpClient);
@@ -132,5 +159,20 @@ export class KnowledgeService {
   /** Семантические связи для конкретного файла (docId). */
   getSuggestions(docId: string): Observable<SuggestResponse> {
     return this.http.post<SuggestResponse>(`${this.baseUrl}/suggest-links`, { docId });
+  }
+
+  /** Сохранение папки для локального сканирования файловой системы. */
+  setWorkspace(folderPath: string): Observable<SetWorkspaceResponse> {
+    return this.http.post<SetWorkspaceResponse>(`${this.baseUrl}/set-workspace`, { folderPath });
+  }
+
+  /** Рекурсивное сканирование рабочей папки и индексация новых файлов. */
+  scanWorkspace(): Observable<ScanResult> {
+    return this.http.get<ScanResult>(`${this.baseUrl}/scan`);
+  }
+
+  /** Текущий прогресс фонового сканирования. */
+  getScanProgress(): Observable<ScanProgress> {
+    return this.http.get<ScanProgress>(`${this.baseUrl}/scan/progress`);
   }
 }

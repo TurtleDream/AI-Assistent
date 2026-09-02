@@ -2,7 +2,7 @@ import { Component, inject, OnDestroy, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
-import { BehaviorSubject, Subject } from 'rxjs';
+import { BehaviorSubject, Subject, interval } from 'rxjs';
 import { takeUntil, finalize } from 'rxjs/operators';
 import {
   KnowledgeService,
@@ -11,7 +11,9 @@ import {
   LLMProvider,
   SaveConfigPayload,
   DocumentInfo,
-  Suggestion
+  Suggestion,
+  ScanProgress,
+  ScanError
 } from './knowledge.service';
 
 @Component({
@@ -26,11 +28,14 @@ export class AppComponent implements OnInit, OnDestroy {
   private sanitizer = inject(DomSanitizer);
   private destroy$ = new Subject<void>();
 
-  // --- Загрузка файлов ---
-  selectedFiles: File[] = [];
-  uploadProject = '';
-  isUploading = false;
-  uploadMessage = '';
+  // --- Сканирование локальной папки ---
+  workspacePath = '';
+  isScanning = false;
+  scanProgress: ScanProgress | null = null;
+  scanMessage = '';
+  scanErrors: ScanError[] = [];
+  /** Управление завершением поллинга прогресса (пересоздаётся на каждый скан). */
+  private scanPollStop$ = new Subject<void>();
 
   // --- Интеллектуальные связи между файлами ---
   documents: DocumentInfo[] = [];
@@ -84,7 +89,7 @@ export class AppComponent implements OnInit, OnDestroy {
   sources$ = new BehaviorSubject<Source[]>([]);
 
   get isLoading(): boolean {
-    return this.isUploading || this.isAsking;
+    return this.isScanning || this.isAsking;
   }
 
   /** Текущие предложенные связи для открытого модала (undefined = расчёт не завершён). */
@@ -108,6 +113,8 @@ export class AppComponent implements OnInit, OnDestroy {
   ngOnDestroy(): void {
     this.destroy$.next();
     this.destroy$.complete();
+    this.scanPollStop$.next();
+    this.scanPollStop$.complete();
   }
 
   loadProjects(): void {
@@ -219,63 +226,107 @@ export class AppComponent implements OnInit, OnDestroy {
       });
   }
 
-  // ============================ Загрузка ============================
+  // ============================ Сканирование папки ============================
 
-  onFileSelected(event: Event): void {
-    const input = event.target as HTMLInputElement;
-    if (input.files && input.files.length > 0) {
-      this.selectedFiles = Array.from(input.files);
-    }
-    // Сбрасываем value, чтобы можно было повторно выбрать тот же файл
-    input.value = '';
-  }
-
-  onDrop(event: DragEvent): void {
-    event.preventDefault();
-    const files = event.dataTransfer?.files;
-    if (files && files.length > 0) {
-      this.selectedFiles = Array.from(files);
-    }
-  }
-
-  onDragOver(event: DragEvent): void {
-    event.preventDefault();
-  }
-
-  upload(): void {
-    if (this.selectedFiles.length === 0) {
-      this.uploadMessage = 'Выберите файлы для загрузки';
+  startScan(): void {
+    const p = this.workspacePath.trim();
+    if (!p) {
+      this.scanMessage = 'Укажите путь к папке';
       return;
     }
-    this.isUploading = true;
-    this.uploadMessage = '';
+    if (this.isScanning) return;
 
+    this.isScanning = true;
+    this.scanMessage = '';
+    this.scanErrors = [];
+    this.scanProgress = {
+      running: true,
+      total: 0,
+      processed: 0,
+      newIndexed: 0,
+      errors: [],
+      current: '',
+      percent: 0
+    };
+
+    // Новый «маркер остановки» поллинга (предыдущий был завершён).
+    this.scanPollStop$ = new Subject<void>();
+    this.startProgressPolling();
+
+    // 1) Сохраняем папку в настройках бэкенда.
     this.knowledge
-      .uploadFile(this.selectedFiles, this.uploadProject)
+      .setWorkspace(p)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: () => this.runScan(),
+        error: (err) => {
+          this.stopScanPolling();
+          this.scanMessage = err.error?.error || 'Не удалось установить папку';
+          console.error('Set workspace error', err);
+        }
+      });
+  }
+
+  private runScan(): void {
+    // 2) Запускаем само сканирование (долгий HTTP-запрос; прогресс тянем поллингом).
+    this.knowledge
+      .scanWorkspace()
       .pipe(
         takeUntil(this.destroy$),
-        // Гарантированно сбрасываем isUploading и по успеху, и по ошибке,
-        // чтобы кнопка «Загрузить» не оставалась заблокированной со спиннером.
-        finalize(() => {
-          this.isUploading = false;
-        })
+        finalize(() => this.stopScanPolling(true))
       )
       .subscribe({
         next: (res) => {
-          const files = res.files ?? 1;
-          this.uploadMessage = `Загружено чанков: ${res.saved} (файлов: ${files})`;
-          this.selectedFiles = [];
-          this.uploadProject = '';
-          if (res.saved > 0) {
-            this.loadProjects();
-            this.loadDocuments();
-          }
+          this.scanMessage = `Просканировано: ${res.totalScanned}, новых: ${res.newIndexed}`;
+          if (res.errors.length) this.scanMessage += `, ошибок: ${res.errors.length}`;
+          this.scanErrors = res.errors || [];
+          this.loadProjects();
+          this.loadDocuments();
         },
         error: (err) => {
-          this.uploadMessage = err.error?.error || 'Ошибка загрузки файлов';
-          console.error('Upload error', err);
+          this.scanMessage = err.error?.error || 'Ошибка сканирования';
+          console.error('Scan error', err);
         }
       });
+  }
+
+  private startProgressPolling(): void {
+    interval(600)
+      .pipe(takeUntil(this.destroy$), takeUntil(this.scanPollStop$))
+      .subscribe({
+        next: () => this.fetchProgress()
+      });
+  }
+
+  private fetchProgress(): void {
+    this.knowledge
+      .getScanProgress()
+      .pipe(takeUntil(this.destroy$), takeUntil(this.scanPollStop$))
+      .subscribe({
+        next: (pr) => {
+          this.scanProgress = pr;
+        },
+        error: () => {}
+      });
+  }
+
+  /** Останавливает поллинг и (опционально) тянет финальный прогресс (100%). */
+  private stopScanPolling(fetchFinal = false): void {
+    this.isScanning = false;
+    if (fetchFinal) {
+      // Отдельный запрос вне маркера остановки, чтобы показать завершённое состояние.
+      this.knowledge
+        .getScanProgress()
+        .pipe(takeUntil(this.destroy$))
+        .subscribe({
+          next: (pr) => {
+            this.scanProgress = pr;
+          },
+          error: () => {}
+        });
+    }
+    this.scanPollStop$.next();
+    this.scanPollStop$.complete();
   }
 
   // ============================ Связи между файлами ============================

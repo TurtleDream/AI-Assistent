@@ -103,41 +103,49 @@
   </section>
 
   <div class="layout">
-    <!-- Сайдбар: загрузка файлов -->
+    <!-- Сайдбар: сканирование локальной папки -->
     <aside class="sidebar">
-      <h2>Загрузка файлов</h2>
+      <h2>Сканирование папки</h2>
 
-      <div
-        class="dropzone"
-        [class.active]="selectedFiles.length"
-        (dragover)="onDragOver($event)"
-        (drop)="onDrop($event)"
-      >
-        <p *ngIf="!selectedFiles.length" class="dz-hint">Перетащите файлы сюда<br>или</p>
-        <div *ngIf="selectedFiles.length" class="dz-files">
-          <p class="dz-file" *ngFor="let f of selectedFiles">📄 {{ f.name }}</p>
-          <p class="dz-count">Выбрано файлов: {{ selectedFiles.length }}</p>
-        </div>
-        <input type="file" id="fileInput" multiple (change)="onFileSelected($event)" />
-        <label for="fileInput" class="btn-file">Выбрать файлы</label>
-        <p class="hint">Поддерживаются: .txt, .md, .js, .py, .json</p>
-      </div>
+      <p class="dz-hint">
+        Укажите путь к локальной папке и нажмите «Отсканировать». Файлы будут
+        проиндексированы автоматически (текст и код).
+      </p>
 
       <div class="field">
-        <label for="projectName">Имя проекта</label>
-        <input id="projectName" [(ngModel)]="uploadProject" placeholder="например: notes" />
+        <label for="workspacePath">Путь к папке</label>
+        <input
+          id="workspacePath"
+          [(ngModel)]="workspacePath"
+          placeholder="например: C:\Users\me\notes"
+          [disabled]="isScanning"
+        />
+        <p class="hint">Поддерживаются: .txt, .md, .js, .py, .json</p>
       </div>
 
       <button
         class="btn-primary"
-        (click)="upload()"
-        [disabled]="isUploading || !selectedFiles.length"
+        (click)="startScan()"
+        [disabled]="isScanning || !workspacePath.trim()"
       >
-        <span *ngIf="!isUploading">Загрузить</span>
-        <span *ngIf="isUploading" class="spinner" aria-label="Загрузка"></span>
+        <span *ngIf="!isScanning">📁 Отсканировать папку</span>
+        <span *ngIf="isScanning" class="spinner" aria-label="Сканирование"></span>
       </button>
 
-      <p class="message" *ngIf="uploadMessage">{{ uploadMessage }}</p>
+      <!-- Прогресс обработки файлов -->
+      <div class="scan-progress" *ngIf="scanProgress && scanProgress.total > 0">
+        <div class="progress-track">
+          <div class="progress-fill" [style.width.%]="scanProgress.percent"></div>
+        </div>
+        <p class="progress-meta">
+          Обработано {{ scanProgress.processed }} / {{ scanProgress.total }}
+          · Новых: {{ scanProgress.newIndexed }}
+        </p>
+        <p class="progress-current" *ngIf="scanProgress.current">{{ scanProgress.current }}</p>
+      </div>
+
+      <p class="message" *ngIf="scanMessage">{{ scanMessage }}</p>
+      <p class="error" *ngIf="scanErrors.length">Ошибок при индексации: {{ scanErrors.length }}</p>
 
       <div class="doc-list">
         <h2>📚 Загруженные файлы</h2>

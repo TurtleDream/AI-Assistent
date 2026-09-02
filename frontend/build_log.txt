@@ -1,0 +1,11 @@
+Initial chunk files | Names         |  Raw size | Estimated transfer size
+main.js             | main          | 212.83 kB |                57.53 kB
+polyfills.js        | polyfills     |  33.71 kB |                11.02 kB
+styles.css          | styles        |  78 bytes |                78 bytes
+
+                    | Initial total | 246.62 kB |                68.62 kB
+
+Output location: C:\Users\stani\projects\AI-Assistent\frontend\dist\knowledge-weaver
+
+Application bundle generation complete. [10.920 seconds]
+

@@ -235,3 +235,22 @@ __Компонент__ (`app.component.ts/html/css`):
 
 - Из `package.json` удалена зависимость `level` (перегенерён `package-lock.json`), добавлено `"engines": { "node": ">=22.5.0" }`.
 - Обновил устаревшие описания в `CONTEXT.md` (LevelDB → SQLite).
+
+
+## Готово — что сделано
+
+### Бэкенд (`backend/server.js`)
+
+1. __Установлены зависимости__ `fast-glob@^3.3.3` и `chokidar@^4.0.3` (добавлены в `package.json`; chokidar заложен на будущий вотчинг).
+2. __Миграция БД__: добавлен столбец `path TEXT NOT NULL DEFAULT ''` в `documents` (для дедупликации по путям) + индекс `idx_documents_path`; новая таблица __`settings` (key/value)__ для хранения пути рабочей папки.
+3. __Хелперы__: `getSetting/setSetting`, `normalizeWorkspacePath` (абсолютный путь с прямыми слэшами), и общий `indexContent()` — чанкинг + эмбеддинги + сохранение (переиспользуется логика из `/upload`).
+4. __`POST /api/set-workspace`__ — принимает `{ folderPath }`, валидирует (существует, является папкой), сохраняет в `settings`.
+5. __`GET /api/scan`__ — fast-glob рекурсивно ищет `.md/.txt/.js/.py/.json` (игнор `node_modules`, `.git`), пропускает уже проиндексированные по `path`, остальные — читает, чанкует (500 симв. текст / 20 строк код), эмбеддит и сохраняет; возвращает `{ totalScanned, newIndexed, errors: [{file, error}] }`. Фоновый режим + защита от повторного запуска (409).
+6. __`GET /api/scan/progress`__ — отдаёт `{ running, total, processed, newIndexed, errors, current, percent }` для поллинга в UI.
+
+### Фронтенд (Angular)
+
+- __`knowledge.service.ts`__: добавлены интерфейсы `SetWorkspaceResponse`, `ScanResult`, `ScanProgress`, `ScanError` и методы `setWorkspace()`, `scanWorkspace()`, `getScanProgress()`.
+- __`app.component.ts`__: загрузка заменена на сканирование (`workspacePath`, `isScanning`, `scanProgress`, `scanMessage`, `scanErrors`); `startScan()` → setWorkspace → scan → поллинг прогресса каждые 600 мс через `interval()`; `stopScanPolling()` через `finalize` и маркер `scanPollStop$`.
+- __`app.component.html`__: дроп-зона заменена на инпут пути + кнопку «📁 Отсканировать папку» + прогресс-бар, счётчик «Обработано X/Y · Новых: N», текущий файл и счётчик ошибок.
+- __`app.component.css`__: добавлены стили `.scan-progress`, `.progress-track/fill/meta/current`, `.error`.
