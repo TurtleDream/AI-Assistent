@@ -62,6 +62,10 @@ export interface DocumentInfo {
   docId: string;
   fileName: string;
   project: string;
+  /** Расширение файла (.md, .js и т.д.). */
+  ext?: string;
+  /** Абсолютный путь (для файлов из локального сканирования; у ручной загрузки пусто). */
+  path?: string;
 }
 
 export interface DocumentsResponse {
@@ -71,6 +75,7 @@ export interface DocumentsResponse {
 export interface Suggestion {
   docId: string;
   fileName: string;
+  project?: string;
   similarity: number;
 }
 
@@ -84,6 +89,48 @@ export interface SuggestResponse {
   docId?: string;
   suggestions?: Suggestion[];
   all?: DocSuggestions[];
+}
+
+export interface ApplyLinkResponse {
+  ok: boolean;
+  alreadyExists?: boolean;
+}
+
+// --- Теги ---
+export interface TagsResponse {
+  tags: string[];
+  filtered?: boolean;
+}
+
+// --- Диаграммы (Mermaid) ---
+export interface DiagramResponse {
+  mermaid: string;
+  fallback?: boolean;
+}
+
+// --- Граф связей ---
+export interface LinkInfo {
+  id: string;
+  sourceId: string;
+  targetId: string;
+  sourceName: string;
+  targetName: string;
+  similarity: number;
+}
+
+export interface LinksResponse {
+  links: LinkInfo[];
+}
+
+// --- Очистка индекса ---
+export interface ClearResponse {
+  ok: boolean;
+  cleared: number;
+}
+
+// --- Рабочая папка ---
+export interface WorkspaceResponse {
+  folderPath: string;
 }
 
 // --- Работа с локальной файловой системой ---
@@ -174,5 +221,42 @@ export class KnowledgeService {
   /** Текущий прогресс фонового сканирования. */
   getScanProgress(): Observable<ScanProgress> {
     return this.http.get<ScanProgress>(`${this.baseUrl}/scan/progress`);
+  }
+
+  /** Текущая рабочая папка (для страницы настроек). */
+  getWorkspace(): Observable<WorkspaceResponse> {
+    return this.http.get<WorkspaceResponse>(`${this.baseUrl}/workspace`);
+  }
+
+  /** Применение (подтверждение) связи между документами. */
+  applyLink(docId: string, targetId: string, similarity = 0): Observable<ApplyLinkResponse> {
+    return this.http.post<ApplyLinkResponse>(`${this.baseUrl}/apply-link`, {
+      docId,
+      targetId,
+      similarity
+    });
+  }
+
+  /** Генерация и сохранение тегов для документа (GPT). */
+  getTags(docId: string): Observable<TagsResponse> {
+    return this.http.post<TagsResponse>(`${this.baseUrl}/suggest-tags`, { docId });
+  }
+
+  /** Генерация Mermaid-диаграммы по документу (или описанию). */
+  generateDiagram(docId: string, description?: string): Observable<DiagramResponse> {
+    return this.http.post<DiagramResponse>(`${this.baseUrl}/generate-diagram`, {
+      docId,
+      description
+    });
+  }
+
+  /** Получение всех подтверждённых связей — для графа зависимостей. */
+  getLinks(): Observable<LinksResponse> {
+    return this.http.get<LinksResponse>(`${this.baseUrl}/links`);
+  }
+
+  /** Полная очистка индекса БД. */
+  clearIndex(): Observable<ClearResponse> {
+    return this.http.delete<ClearResponse>(`${this.baseUrl}/clear`);
   }
 }

@@ -1132,20 +1132,64 @@ app.get('/api/projects', async (req, res) => {
 });
 
 // Список загруженных документов для UI (docId = documents.id).
+// Дополнительно отдаём path (абсолютный путь из локального сканирования) и
+// расширение — они нужны для построения дерева папок на главной странице.
 app.get('/api/docs', async (req, res) => {
   try {
     const rows = db
-      .prepare('SELECT id, fileName, project FROM documents ORDER BY id')
+      .prepare('SELECT id, fileName, project, ext, path FROM documents ORDER BY id')
       .all();
     const documents = rows.map((r) => ({
       docId: String(r.id),
       fileName: r.fileName,
-      project: r.project
+      project: r.project,
+      ext: r.ext || '',
+      path: r.path || ''
     }));
     return res.json({ documents });
   } catch (err) {
     console.error('Docs error:', err);
     return res.status(500).json({ error: 'Ошибка при получении списка документов' });
+  }
+});
+
+// Текущая рабочая папка (workspacePath из таблицы settings). Нужна на странице
+// настроек, чтобы показать пользователю уже выбранный путь.
+app.get('/api/workspace', async (req, res) => {
+  try {
+    return res.json({ folderPath: getSetting('workspacePath') || '' });
+  } catch (err) {
+    console.error('Workspace error:', err);
+    return res.status(500).json({ error: 'Ошибка при получении рабочей папки' });
+  }
+});
+
+// Список подтверждённых связей (document_relations) с именами файлов.
+// Используется фронтендом для визуализации графа зависимостей.
+app.get('/api/links', async (req, res) => {
+  try {
+    const rows = db
+      .prepare(
+        `SELECT dr.id, dr.source_id, dr.target_id, dr.similarity,
+                sd.fileName AS sourceName, td.fileName AS targetName
+         FROM document_relations dr
+         JOIN documents sd ON sd.id = dr.source_id
+         JOIN documents td ON td.id = dr.target_id
+         ORDER BY dr.id`
+      )
+      .all();
+    const links = rows.map((r) => ({
+      id: String(r.id),
+      sourceId: String(r.source_id),
+      targetId: String(r.target_id),
+      sourceName: r.sourceName,
+      targetName: r.targetName,
+      similarity: Number(r.similarity) || 0
+    }));
+    return res.json({ links });
+  } catch (err) {
+    console.error('Links error:', err);
+    return res.status(500).json({ error: 'Ошибка при получении связей' });
   }
 });
 

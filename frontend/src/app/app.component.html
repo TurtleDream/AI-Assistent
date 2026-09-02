@@ -1,7 +1,15 @@
 <div class="app">
   <!-- Шапка -->
   <header class="topbar">
-    <h1>🧶 Knowledge Weaver</h1>
+    <div class="brand">
+      <h1>🧶 Knowledge Weaver</h1>
+      <nav class="nav-tabs">
+        <button [class.active]="activeView === 'home'" (click)="switchView('home')">🏠 Главная</button>
+        <button [class.active]="activeView === 'docs'" (click)="switchView('docs')">📚 Документы</button>
+        <button [class.active]="activeView === 'graph'" (click)="switchView('graph')">🕸️ Граф</button>
+        <button [class.active]="activeView === 'settings'" (click)="switchView('settings')">⚙️ Настройки</button>
+      </nav>
+    </div>
     <div class="topbar-actions">
       <div class="project-select">
         <label for="projectFilter">Проект:</label>
@@ -102,61 +110,60 @@
     </p>
   </section>
 
-  <div class="layout">
-    <!-- Сайдбар: сканирование локальной папки -->
+  <!-- ============================ ГЛАВНАЯ ============================ -->
+  <div class="layout" *ngIf="activeView === 'home'">
+    <!-- Сайдбар: дерево папок + сканирование -->
     <aside class="sidebar">
-      <h2>Сканирование папки</h2>
+      <h2>🗂️ Структура проекта</h2>
 
-      <p class="dz-hint">
-        Укажите путь к локальной папке и нажмите «Отсканировать». Файлы будут
-        проиндексированы автоматически (текст и код).
-      </p>
-
-      <div class="field">
-        <label for="workspacePath">Путь к папке</label>
-        <input
-          id="workspacePath"
-          [(ngModel)]="workspacePath"
-          placeholder="например: C:\Users\me\notes"
-          [disabled]="isScanning"
-        />
-        <p class="hint">Поддерживаются: .txt, .md, .js, .py, .json</p>
-      </div>
-
-      <button
-        class="btn-primary"
-        (click)="startScan()"
-        [disabled]="isScanning || !workspacePath.trim()"
-      >
-        <span *ngIf="!isScanning">📁 Отсканировать папку</span>
-        <span *ngIf="isScanning" class="spinner" aria-label="Сканирование"></span>
-      </button>
-
-      <!-- Прогресс обработки файлов -->
-      <div class="scan-progress" *ngIf="scanProgress && scanProgress.total > 0">
-        <div class="progress-track">
-          <div class="progress-fill" [style.width.%]="scanProgress.percent"></div>
-        </div>
-        <p class="progress-meta">
-          Обработано {{ scanProgress.processed }} / {{ scanProgress.total }}
-          · Новых: {{ scanProgress.newIndexed }}
+      <div class="scan-block">
+        <p class="dz-hint">
+          Укажите путь к локальной папке и нажмите «Отсканировать». Файлы будут
+          проиндексированы автоматически (текст и код).
         </p>
-        <p class="progress-current" *ngIf="scanProgress.current">{{ scanProgress.current }}</p>
+
+        <div class="field">
+          <label for="workspacePath">Путь к папке</label>
+          <input
+            id="workspacePath"
+            [(ngModel)]="workspacePath"
+            placeholder="например: C:\Users\me\notes"
+            [disabled]="isScanning"
+          />
+          <p class="hint">Поддерживаются: .txt, .md, .js, .py, .json</p>
+        </div>
+
+        <button
+          class="btn-primary"
+          (click)="startScan()"
+          [disabled]="isScanning || !workspacePath.trim()"
+        >
+          <span *ngIf="!isScanning">📁 Отсканировать папку</span>
+          <span *ngIf="isScanning" class="spinner" aria-label="Сканирование"></span>
+        </button>
+
+        <!-- Прогресс обработки файлов -->
+        <div class="scan-progress" *ngIf="scanProgress && scanProgress.total > 0">
+          <div class="progress-track">
+            <div class="progress-fill" [style.width.%]="scanProgress.percent"></div>
+          </div>
+          <p class="progress-meta">
+            Обработано {{ scanProgress.processed }} / {{ scanProgress.total }}
+            · Новых: {{ scanProgress.newIndexed }}
+          </p>
+          <p class="progress-current" *ngIf="scanProgress.current">{{ scanProgress.current }}</p>
+        </div>
+
+        <p class="message" *ngIf="scanMessage">{{ scanMessage }}</p>
+        <p class="error" *ngIf="scanErrors.length">Ошибок при индексации: {{ scanErrors.length }}</p>
       </div>
 
-      <p class="message" *ngIf="scanMessage">{{ scanMessage }}</p>
-      <p class="error" *ngIf="scanErrors.length">Ошибок при индексации: {{ scanErrors.length }}</p>
-
-      <div class="doc-list">
-        <h2>📚 Загруженные файлы</h2>
-        <p class="hint" *ngIf="!documents.length">Пока нет загруженных файлов.</p>
-        <div class="doc-item" *ngFor="let doc of documents">
-          <div class="doc-info">
-            <strong>📄 {{ doc.fileName }}</strong>
-            <span class="doc-project">{{ doc.project }}</span>
-          </div>
-          <button class="btn-links" (click)="findLinks(doc)">🔗 Найти связи</button>
-        </div>
+      <div class="tree-panel">
+        <p class="hint" *ngIf="!folderTree.length">Дерево папок появится после индексации файлов.</p>
+        <app-folder-tree
+          [nodes]="folderTree"
+          (nodeClick)="openTreeFile($event)"
+        ></app-folder-tree>
       </div>
     </aside>
 
@@ -197,6 +204,93 @@
       </section>
     </main>
   </div>
+
+  <!-- ============================ ДОКУМЕНТЫ ============================ -->
+  <div class="layout" *ngIf="activeView === 'docs'">
+    <main class="main main-full">
+      <div class="docs-header">
+        <h2>📚 Проиндексированные документы</h2>
+        <span class="docs-count" *ngIf="documents.length">{{ documents.length }}</span>
+      </div>
+
+      <p class="hint" *ngIf="!documents.length">
+        Пока нет проиндексированных файлов. Загрузите файлы или отсканируйте папку.
+      </p>
+
+      <div class="docs-table" *ngIf="documents.length">
+        <div class="docs-row docs-head">
+          <span>Файл</span>
+          <span>Проект</span>
+          <span>Действия</span>
+        </div>
+        <div class="docs-row" *ngFor="let doc of documents">
+          <div class="doc-cell">
+            <strong>📄 {{ doc.fileName }}</strong>
+            <span class="doc-ext" *ngIf="doc.ext">{{ doc.ext }}</span>
+          </div>
+          <div class="doc-cell doc-project">{{ doc.project }}</div>
+          <div class="doc-cell doc-actions">
+            <button class="btn-links" (click)="findLinks(doc)">🔗 Связать</button>
+            <button class="btn-tags" (click)="openTags(doc)">🏷️ Теги</button>
+            <button class="btn-diagram" (click)="generateDiagramFor(doc)">📊 Схема</button>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+<!-- ============================ ГРАФ ============================ -->
+  <div class="graph-view" *ngIf="activeView === 'graph'">
+    <div class="graph-header">
+      <h2>🕸️ Граф связей документов</h2>
+      <button class="btn-secondary" (click)="loadGraph()" [disabled]="isGraphLoading">🔄 Обновить</button>
+    </div>
+
+    <div *ngIf="isGraphLoading" class="graph-loading">
+      <span class="spinner spinner-dark" aria-label="Загрузка графа"></span>
+      <span>Загружаем связи…</span>
+    </div>
+
+    <p class="message" *ngIf="graphMessage">{{ graphMessage }}</p>
+
+    <div class="graph-canvas-wrap" *ngIf="!isGraphLoading && graphLinks.length">
+      <canvas id="graph-canvas" class="graph-canvas"></canvas>
+      <p class="hint">Клик по узлу открывает его связи. Связи появляются после подтверждения в разделе «Документы».</p>
+    </div>
+  </div>
+
+  <!-- ============================ НАСТРОЙКИ ============================ -->
+  <div class="layout" *ngIf="activeView === 'settings'">
+    <main class="main main-full">
+      <h2>⚙️ Настройки приложения</h2>
+
+      <section class="settings-block">
+        <h3>🗂️ Рабочая папка</h3>
+        <p class="dz-hint">
+          Здесь можно изменить путь к локальной папке для сканирования и индексации файлов,
+          не запуская само сканирование.
+        </p>
+        <div class="field">
+          <label for="settingsWorkspacePath">Путь к папке</label>
+          <input id="settingsWorkspacePath" [(ngModel)]="workspacePath" placeholder="C:\Users\me\notes" />
+        </div>
+        <button class="btn-primary btn-save" (click)="saveWorkspacePath()" [disabled]="isClearing">
+          <span *ngIf="!isClearing">Сохранить папку</span>
+          <span *ngIf="isClearing" class="spinner" aria-label="Сохранение"></span>
+        </button>
+      </section>
+
+      <section class="settings-block">
+        <h3>🧹 Индекс базы данных</h3>
+        <p class="dz-hint">
+          Полностью удаляет все проиндексированные документы, чанки, теги и связи из SQLite.
+          Это действие необратимо.
+        </p>
+        <button class="btn-danger" (click)="confirmClear()" [disabled]="isClearing">🗑️ Очистить индекс</button>
+      </section>
+
+      <p class="message" *ngIf="clearMessage">{{ clearMessage }}</p>
+    </main>
+  </div>
 <!-- Модал: интеллектуальные связи -->
   <div class="modal-overlay" *ngIf="activeLinksDoc" (click)="closeLinks()">
     <div class="modal" (click)="$event.stopPropagation()">
@@ -207,7 +301,7 @@
 
       <div class="modal-body">
         <div *ngIf="activeLinksLoading" class="links-loading">
-          <span class="spinner" aria-label="Расчёт"></span>
+          <span class="spinner spinner-dark" aria-label="Расчёт"></span>
           <span>Ищем семантические связи…</span>
         </div>
 
@@ -223,7 +317,7 @@
               <button
                 class="btn-link"
                 [class.linked]="isLinked(activeLinksDoc.docId, sug.docId)"
-                (click)="toggleLink(activeLinksDoc.docId, sug.docId)"
+                (click)="toggleLink(activeLinksDoc.docId, sug.docId, sug.similarity)"
               >
                 {{ isLinked(activeLinksDoc.docId, sug.docId) ? '✓ Связано' : 'Связать' }}
               </button>
@@ -234,6 +328,61 @@
             <p class="links-empty">Для этого файла не найдено семантических связей</p>
           </ng-container>
         </ng-container>
+      </div>
+    </div>
+  </div>
+
+  <!-- Модал: теги -->
+  <div class="modal-overlay" *ngIf="activeTagsDoc" (click)="closeTags()">
+    <div class="modal" (click)="$event.stopPropagation()">
+      <div class="modal-head">
+        <h2>🏷️ Теги для «{{ activeTagsDoc.fileName }}»</h2>
+        <button class="btn-close" (click)="closeTags()">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <div *ngIf="isTagging" class="links-loading">
+          <span class="spinner spinner-dark" aria-label="Генерация тегов"></span>
+          <span>Генерируем теги…</span>
+        </div>
+
+        <p class="links-error" *ngIf="tagsError && !isTagging">{{ tagsError }}</p>
+
+        <div class="tag-cloud" *ngIf="!isTagging && activeTags && !tagsError">
+          <span class="tag-chip" *ngFor="let t of activeTags">#{{ t }}</span>
+          <p class="links-empty" *ngIf="!activeTags.length">Теги не найдены.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Модал: диаграмма Mermaid -->
+  <div class="modal-overlay" *ngIf="diagramDoc" (click)="closeDiagram()">
+    <div class="modal modal-wide" (click)="$event.stopPropagation()">
+      <div class="modal-head">
+        <h2>📊 Диаграмма «{{ diagramDoc.fileName }}»</h2>
+        <button class="btn-close" (click)="closeDiagram()">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <div *ngIf="isDiagramLoading" class="links-loading">
+          <span class="spinner spinner-dark" aria-label="Генерация диаграммы"></span>
+          <span>Генерируем Mermaid-диаграмму…</span>
+        </div>
+
+        <p class="links-error" *ngIf="diagramError && !isDiagramLoading">{{ diagramError }}</p>
+
+        <div class="diagram-result" *ngIf="!isDiagramLoading && mermaid">
+          <p class="hint" *ngIf="isMermaidFallback">⚠️ Модель не смогла построить диаграмму — показана упрощённая схема.</p>
+          <pre class="code-block">{{ mermaid }}</pre>
+          <div class="diagram-actions">
+            <a class="btn-secondary" [href]="'https://mermaid.live/edit#' + encodeMermaid(mermaid)" target="_blank" rel="noopener">
+              🌐 Открыть в mermaid.live
+            </a>
+            <button class="btn-secondary" (click)="openDiagramInWindow()">🖥️ Открыть в окне</button>
+            <button class="btn-secondary" (click)="downloadMermaid()">⬇️ Скачать .mmd</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>

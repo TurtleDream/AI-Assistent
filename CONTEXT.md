@@ -42,7 +42,8 @@
 │     ├─ index.html, main.ts, styles.css
 │     ├─ app/
 │        ├─ app.config.ts            (provideHttpClient)
-│        ├─ app.component.ts/html/css (весь UI в одном standalone-компоненте)
+│        ├─ app.component.ts/html/css (основной UI: навигация по вкладкам, все экраны)
+│        ├─ folder-tree.component.ts  (рекурсивное Obsidian-подобное дерево папок)
 │        ├─ knowledge.service.ts     (все API-методы + интерфейсы)
 ```
 
@@ -92,7 +93,13 @@
 | POST | `/api/suggest-tags` | `{ docId }` | `{ tags: string[], filtered }` — GPT-теги по первым 3 чанкам, сохранены в `tags`+`doc_tags` |
 | POST | `/api/generate-diagram` | `{ docId? , description? }` | `{ mermaid, fallback? }` — Mermaid-код от GPT |
 | GET | `/api/projects` | — | `{ projects: string[] }` |
-| DELETE | `/api/clear` | — | `{ ok, cleared }` — очищает всю БД (LevelDB + in-memory; полезно для тестирования) |
+| GET | `/api/docs` | — | `{ documents: [{ docId, fileName, project, ext, path }] }` — для таблицы документов и дерева папок |
+| GET | `/api/links` | — | `{ links: [{ id, sourceId, targetId, sourceName, targetName, similarity }] }` — подтверждённые связи (для графа) |
+| POST | `/api/set-workspace` | `{ folderPath }` | `{ ok, folderPath }` — сохраняет рабочую папку в таблице `settings` |
+| GET | `/api/workspace` | — | `{ folderPath }` — текущая рабочая папка (для настроек) |
+| GET | `/api/scan` | — | `{ totalScanned, newIndexed, errors }` — фоновое сканирование рабочей папки |
+| GET | `/api/scan/progress` | — | `{ running, total, processed, newIndexed, errors, current, percent }` — прогресс сканирования |
+| DELETE | `/api/clear` | — | `{ ok, cleared }` — очищает всю БД (SQLite; полезно для тестирования) |
 | GET | `/api/stats` | — | `{ chunkCount, fileCount, projects }` |
 | GET | `/api/config` | — | `{ config: { provider, baseURL, chatModel, embeddingModel, yandexFolderId, hasApiKey, maskedApiKey } }` |
 | POST | `/api/config` | `{ provider?, baseURL?, apiKey?, chatModel?, embeddingModel?, yandexFolderId? }` | `{ ok, saved }` |
@@ -122,22 +129,35 @@
 
 ### `knowledge.service.ts`
 - `baseUrl = 'http://localhost:3000/api'`.
-- Методы: `uploadFile(files: File[], project)` (мульти-загрузка: форма с полем `file[]`), `askQuestion(question, project)`, `getProjects()`, `getConfig()`, `saveConfig(payload)`, `getModels()`.
-- Экспорт интерфейсов: `Source`, `QueryResponse`, `ProjectsResponse`, `UploadResponse`, `LLMProvider ('openai'|'yandex')`, `LLMConfig`, `ConfigResponse`, `SaveConfigPayload`, `ModelsResponse`.
+- Методы: `uploadFile(files: File[], project)` (мульти-загрузка: форма с полем `file[]`), `askQuestion(question, project)`, `getProjects()`, `getConfig()`, `saveConfig(payload)`, `getModels()`, `getDocuments()`, `getSuggestions(docId)`, `applyLink(docId, targetId, similarity)`, `getTags(docId)`, `generateDiagram(docId, description?)`, `getLinks()`, `getWorkspace()`, `setWorkspace(folderPath)`, `scanWorkspace()`, `getScanProgress()`, `clearIndex()`.
+- Экспорт интерфейсов: `Source`, `QueryResponse`, `ProjectsResponse`, `UploadResponse`, `LLMProvider ('openai'|'yandex')`, `LLMConfig`, `ConfigResponse`, `SaveConfigPayload`, `ModelsResponse`, `DocumentInfo` (+ `ext`/`path`), `DocumentsResponse`, `Suggestion`, `SuggestResponse`, `ApplyLinkResponse`, `TagsResponse`, `DiagramResponse`, `LinkInfo`/`LinksResponse`, `ClearResponse`, `WorkspaceResponse`, `SetWorkspaceResponse`, `ScanResult`, `ScanProgress`, `ScanError`.
 
 ### `app.component.ts`
-- Standalone, `inject()`. Геттеры: `isLoading`, `isYandex`, `activeChatModels`, `activeEmbeddingModels`.
-- **Загрузка (мульти):** `selectedFiles: File[]`, `uploadProject`, `isUploading`, `uploadMessage`; `onFileSelected` (сброс `value` для повторного выбора тех же файлов), `onDrop` (мульти-drag-and-drop), `onDragOver`, `upload()`. **Важно:** флаг `isUploading` сбрасывается через `finalize()` — и на успехе, и на ошибке, иначе спиннер крутится бесконечно.
+- Standalone, `inject()`. Геттеры: `isLoading`, `isYandex`, `activeChatModels`, `activeEmbeddingModels`, `activeLinksSuggestions`, `activeLinksLoading`, `activeTags`, `isTagging`.
+- **Навигация по вкладкам:** `activeView: 'home' | 'docs' | 'graph' | 'settings'`; `switchView()` — переключает экран и подгружает нужные данные.
+- **Сканирование папки:** `workspacePath`, `isScanning`, `scanProgress`, `scanMessage`, `scanErrors`; `startScan()` + поллинг `getScanProgress()` (≈500 мс, останавливается через `scanPollStop$`).
+- **Дерево папок:** `folderTree: FolderNode[]`, `buildFolderTree()` (строит из `documents[].path`, файлы без пути — в корень «Загруженные файлы»), `toggleFolder()`, `openTreeFile()` (клик по файлу → модал связей).
 - **Проекты:** `projects[]`, `selectedProject` (`''` = «Все» → `project: null`), `loadProjects()`.
 - **LLM-конфиг:** `showSettings`, `configLoaded`, `llmConfig`, списки моделей, `cfgProvider/baseURL/apiKey/chatModel/embeddingModel/yandexFolderId`, `isSavingConfig`, `configMessage`; `loadConfig()`, `toggleSettings()`, `saveConfig()` (ключ отправляется только при новом вводе, `••••••••` игнор).
+- **Связи:** `documents`, `suggestionsByDoc`, `activeLinksDoc`, `isSuggestingDoc`, `linksError`, `linkedPairs`; `findLinks()`, `closeLinks()`, `toggleLink()` (вызывает `applyLink` на бэке), `loadConfirmedLinks()`.
+- **Теги:** `activeTagsDoc`, `taggingDocId`, `tagsError`, `tagsByDoc`; `openTags()`, `closeTags()`.
+- **Диаграммы:** `diagramDoc`, `isDiagramLoading`, `diagramError`, `mermaid`, `isMermaidFallback`; `generateDiagramFor()`, `closeDiagram()`, `openDiagramInWindow()`, `downloadMermaid()`, `encodeMermaid()` (base64 для mermaid.live).
+- **Граф:** `graphLinks`, `isGraphLoading`, `graphMessage`; `loadGraph()`, `drawGraph()` — самописная force-симуляция на `<canvas>` (без сторонних библиотек), клик по узлу → `findLinks`.
+- **Настройки приложения:** `isClearing`, `clearMessage`; `saveWorkspacePath()`, `confirmClear()` (через `DELETE /api/clear`).
 - **Вопрос/ответ:** `question`, `isAsking`, `answer$` (BehaviorSubject<SafeHtml>), `sources$`; `ask()`.
 - `formatAnswer()` — markdown-lite: экранирует HTML → ```code``` → `<pre class="code-block">`, остальные переносы → `<br>`, затем `bypassSecurityTrustHtml`.
 
 ### `app.component.html` — структура UI
-- Шапка: лого + селект проекта («Все» + список) + кнопка «⚙️ Настройки AI».
-- Панель настроек (`*ngIf="showSettings"`): провайдер (select), Base URL, API-ключ (password), Folder ID (только для yandex), Chat-модель + Embedding-модель (input + `datalist`), Сохранить/Закрыть, предупреждения.
-- Сайдбар: drag-and-drop зона (мульти-файлы, список выбранных + счётчик, `multiple` на input) + кнопка выбора файлов + инпут проекта + кнопка «Загрузить» (спиннер при загрузке; `[disabled]="isUploading || !selectedFiles.length"`).
-- Основная область: textarea вопроса + «Спросить» (спиннер), блок «Ответ» (markdown), блок «Источники» (файл + цитата), пустое состояние.
+- Шапка: бренд + вкладки «🏠 Главная / 📚 Документы / 🕸️ Граф / ⚙️ Настройки» + селект проекта + кнопка «⚙️ Настройки AI».
+- Панель настроек AI (`*ngIf="showSettings"`): провайдер (select), Base URL, API-ключ (password), Folder ID (только для yandex), Chat-модель + Embedding-модель (input + `datalist`), Сохранить/Закрыть, предупреждения.
+- **Главная** (`*ngIf="activeView === 'home'"`): сайдбар с полем пути + «📁 Отсканировать папку» (спиннер + прогресс-бар) и рекурсивным `<app-folder-tree>` (Obsidian-стиль); основная область — textarea вопроса + «Спросить», блок «Ответ» (markdown), блок «Источники», пустое состояние.
+- **Документы** (`*ngIf="activeView === 'docs'"`): таблица `documents` (файл + ext, проект, действия) с кнопками «🔗 Связать» / «🏷️ Теги» / «📊 Схема» у каждого файла.
+- **Граф** (`*ngIf="activeView === 'graph'"`): `<canvas id="graph-canvas">` с force-графом связей + кнопка «Обновить».
+- **Настройки** (`*ngIf="activeView === 'settings'"`): «Рабочая папка» (смена `workspacePath` + «Сохранить папку») и «Индекс БД» (кнопка «🗑️ Очистить индекс» с `confirm`).
+- Модалы: связи (спиннер, список `suggestions` с % схожести и кнопкой «Связать»/«✓ Связано»), теги (чипы `#tag`), диаграмма (код Mermaid + ссылка mermaid.live + открыть в окне + скачать `.mmd`).
+
+### `folder-tree.component.ts`
+- Standalone, рекурсивный. `@Input() nodes: FolderNode[]`, `@Output() nodeClick` (клик по файлу) и `toggle` (свернуть/развернуть папку). Экспортирует интерфейс `FolderNode { name, type: 'folder'|'file', path?, docId?, children?, expanded? }`.
 
 ## 6. Запуск / команды
 - Backend: `cd backend && npm install && npm start` (порт 3000). Ключ в `.env` или через UI.

@@ -1,6 +1,28 @@
 Краткий журнал ключевых изменений проекта.
 Журнал изменений
 
+
+2026-09-02 17:37 — v0.8 Обновление Ui
+
+Область: Backend | Frontend
+
+Что изменилось:
+
+    Добавлены список документов, главная страница, визуализация графа и настройки
+
+Затронутые пути:
+
+    backend/server.js
+    frontend/folder-tree.component
+    frontend/knowledge.service.ts
+    frontend/app.component.ts
+    frontend/app.component.html
+    frontend/app.component.css
+
+Зачем / контекст:
+
+    Полный доступ к функционалу со стороны UI
+
 2026-09-02 17:03  — v0.7 Доработан функционал AI ассистента
 
 Область: Backend
