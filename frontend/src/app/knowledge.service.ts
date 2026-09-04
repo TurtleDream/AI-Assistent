@@ -29,9 +29,11 @@ export type LLMProvider = 'openai' | 'yandex';
 
 export interface LLMConfig {
   provider: LLMProvider;
+
   baseURL: string;
   chatModel: string;
   embeddingModel: string;
+  yandexEmbeddingModel: string;
   yandexFolderId: string;
   hasApiKey: boolean;
   maskedApiKey: string;
@@ -47,6 +49,7 @@ export interface SaveConfigPayload {
   apiKey?: string;
   chatModel?: string;
   embeddingModel?: string;
+  yandexEmbeddingModel?: string;
   yandexFolderId?: string;
 }
 
@@ -116,10 +119,46 @@ export interface LinkInfo {
   sourceName: string;
   targetName: string;
   similarity: number;
+  /** Тип связи: 'ai' (подтверждённая AI-связь) или 'wiki_link' ([[Obsidian-ссылка]]). */
+  type?: string;
 }
 
 export interface LinksResponse {
   links: LinkInfo[];
+}
+
+// --- Экспорт AI-связей обратно в Obsidian (.md) ---
+export interface ExportLinkResult {
+  ok: boolean;
+  added?: number;
+  already?: number;
+  links?: string[];
+  error?: string;
+}
+
+export interface ExportResponse {
+  ok: boolean;
+  added?: number;
+  already?: number;
+  done?: number;
+  links?: string[];
+  results?: ExportLinkResult[];
+  /** Теги, которые экспортированы в файл. */
+  tags?: string[];
+  /** Сколько тегов добавлено (новых). */
+  tagsAdded?: number;
+  /** Сколько связей добавлено (новых). */
+  linkAdded?: number;
+}
+
+/** Содержимое документа для просмотра. */
+export interface FileContentResponse {
+  fileName: string;
+  ext: string;
+  /** 'disk' — прочитан с диска, 'chunks' — собран из чанков. */
+  source: 'disk' | 'chunks';
+  size: number;
+  content: string;
 }
 
 // --- Очистка индекса ---
@@ -258,5 +297,25 @@ export class KnowledgeService {
   /** Полная очистка индекса БД. */
   clearIndex(): Observable<ClearResponse> {
     return this.http.delete<ClearResponse>(`${this.baseUrl}/clear`);
+  }
+
+  /**
+   * Экспорт подтверждённых AI-связей обратно в Obsidian: вставляет в конец .md-файлов
+   * HTML-комментарий вида `AI Suggested: связан с [[File2]] (85%)`.
+   * Без docId экспортируются связи для всех локальных .md-документов.
+   */
+  exportLinks(docId?: string): Observable<ExportResponse> {
+    return this.http.post<ExportResponse>(
+      `${this.baseUrl}/export-links`,
+      docId ? { docId } : {}
+    );
+  }
+
+  /** Просмотр содержимого документа (с диска или из чанков). */
+  getFileContent(docId: string): Observable<FileContentResponse> {
+    return this.http.get<FileContentResponse>(
+      `${this.baseUrl}/file/content`,
+      { params: { docId } }
+    );
   }
 }

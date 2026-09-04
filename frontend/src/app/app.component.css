@@ -822,7 +822,102 @@
   border-color: #7c3aed;
 }
 
+.btn-preview {
+  background: #e0e7ff;
+  color: #3730a3;
+  border-color: #c7d2fe;
+}
+
+.btn-preview:hover {
+  background: #c7d2fe;
+}
+
 .btn-diagram {
+  padding: 7px 12px;
+
+.preview-result { display: flex; flex-direction: column; gap: 8px; }
+.preview-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.preview-modes { display: flex; gap: 6px; }
+.btn-mode {
+  padding: 5px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #f9fafb;
+  color: #374151;
+  font-size: 12px;
+  cursor: pointer;
+}
+.btn-mode.active {
+  background: #4f46e5;
+  border-color: #4f46e5;
+  color: #fff;
+}
+.preview-meta { color: #64748b; font-size: 12px; margin: 0; }
+
+/* Режим чтения документа */
+.doc-reading {
+  max-height: 62vh;
+  overflow: auto;
+  padding: 18px 22px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  line-height: 1.65;
+  font-size: 15px;
+  color: #1f2937;
+  word-break: break-word;
+}
+.doc-reading h2, .doc-reading h3, .doc-reading h4,
+.doc-reading h5, .doc-reading h6 {
+  margin: 18px 0 8px;
+  line-height: 1.3;
+  color: #111827;
+}
+.doc-reading h2 { font-size: 22px; }
+.doc-reading h3 { font-size: 18px; }
+.doc-reading h4 { font-size: 16px; }
+.doc-reading ul {
+  margin: 8px 0;
+  padding-left: 24px;
+}
+.doc-reading li { margin: 4px 0; }
+.doc-reading blockquote {
+  margin: 10px 0;
+  padding: 8px 14px;
+  border-left: 3px solid #a5b4fc;
+  background: #eef2ff;
+  border-radius: 0 6px 6px 0;
+  color: #3730a3;
+}
+.doc-reading code {
+  background: #f3f4f6;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 13px;
+  color: #b91c1c;
+}
+.doc-reading pre.code-block { margin: 12px 0; }
+.doc-reading .wiki-link {
+  color: #4f46e5;
+  background: #eef2ff;
+  border-radius: 4px;
+  padding: 0 3px;
+}
+
+.preview-block {
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
   padding: 7px 12px;
   background: #f3f4f6;
   color: #0d9488;
@@ -836,6 +931,31 @@
 .btn-diagram:hover {
   background: #ccfbf1;
   border-color: #0d9488;
+}
+
+/* ---------- Экспорт связей в Obsidian ---------- */
+.docs-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.btn-export {
+  padding: 8px 14px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  border: 1px solid #bfdbfe;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.btn-export:hover {
+  background: #dbeafe;
+  border-color: #3b82f6;
 }
 
 /* ---------- Теги ---------- */
@@ -958,4 +1078,37 @@
 .btn-danger:disabled {
   background: #fca5a5;
   cursor: not-allowed;
+}
+
+/* ---------- Легенда графа связей ---------- */
+.graph-legend {
+  display: flex;
+  gap: 20px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #374151;
+}
+
+.legend-line {
+  display: inline-block;
+  width: 24px;
+  height: 0;
+  border-top: 3px solid;
+}
+
+.legend-ai {
+  border-color: #94a3b8;
+  border-style: solid;
+}
+
+.legend-wiki {
+  border-color: #059669;
+  border-style: dashed;
 }

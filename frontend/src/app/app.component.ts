@@ -15,7 +15,8 @@ import {
   Suggestion,
   ScanProgress,
   ScanError,
-  LinkInfo
+  LinkInfo,
+  FileContentResponse
 } from './knowledge.service';
 
 /** Узел графа зависимостей (внутренняя структура для canvas-симуляции). */
@@ -77,6 +78,18 @@ export class AppComponent implements OnInit, OnDestroy {
   diagramError = '';
   mermaid: string | null = null;
   isMermaidFallback = false;
+
+  // --- Просмотр файла ---
+  previewDoc: DocumentInfo | null = null;
+  previewContent: FileContentResponse | null = null;
+  isPreviewLoading = false;
+  previewError = '';
+
+  get previewMeta(): string {
+    const size = this.previewContent?.size ?? 0;
+    const src = this.previewContent?.source === 'chunks' ? 'из чанков' : 'с диска';
+    return `Файл: ${this.previewDoc?.path ?? this.previewDoc?.fileName} · ${(size / 1024).toFixed(1)} КБ · прочитан ${src}`;
+  }
 
   // --- Граф связей ---
   graphLinks: LinkInfo[] = [];
@@ -303,8 +316,12 @@ export class AppComponent implements OnInit, OnDestroy {
           this.llmConfig = res.config;
           this.cfgProvider = res.config.provider || 'openai';
           this.cfgBaseURL = res.config.baseURL;
+
           this.cfgChatModel = res.config.chatModel;
-          this.cfgEmbeddingModel = res.config.embeddingModel;
+
+          this.cfgEmbeddingModel = this.isYandex
+            ? (res.config.yandexEmbeddingModel || res.config.embeddingModel)
+            : res.config.embeddingModel;
           this.cfgYandexFolderId = res.config.yandexFolderId || '';
           this.configLoaded = true;
         },
@@ -345,7 +362,13 @@ export class AppComponent implements OnInit, OnDestroy {
     payload.provider = this.cfgProvider;
     if (this.cfgBaseURL.trim()) payload.baseURL = this.cfgBaseURL.trim();
     if (this.cfgChatModel.trim()) payload.chatModel = this.cfgChatModel.trim();
-    if (this.cfgEmbeddingModel.trim()) payload.embeddingModel = this.cfgEmbeddingModel.trim();
+    if (this.cfgEmbeddingModel.trim()) {
+      if (this.isYandex) {
+        payload.yandexEmbeddingModel = this.cfgEmbeddingModel.trim();
+      } else {
+        payload.embeddingModel = this.cfgEmbeddingModel.trim();
+      }
+    }
     if (this.cfgYandexFolderId.trim()) payload.yandexFolderId = this.cfgYandexFolderId.trim();
     // Ключ отправляем только если пользователь реально ввёл новый
     if (this.cfgApiKey.trim() && this.cfgApiKey.trim() !== '••••••••') {
@@ -557,6 +580,50 @@ export class AppComponent implements OnInit, OnDestroy {
       });
   }
 
+  // ============================ Экспорт связей в Obsidian ============================
+
+  exportMessage = '';
+
+  /** Экспортирует подтверждённые AI-связи конкретного документа в его .md-файл. */
+  exportDoc(doc: DocumentInfo): void {
+    this.exportMessage = '';
+    this.knowledge
+      .exportLinks(doc.docId)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (res) => {
+          this.exportMessage = res.ok
+            ? `«${doc.fileName}»: связей добавлено ${res.linkAdded ?? res.added ?? 0}, тегов записано ${res.tagsAdded ?? 0}.`
+            : 'Экспорт не выполнен';
+          this.loadConfirmedLinks();
+        },
+        error: (err) => {
+          this.exportMessage = err.error?.error || 'Ошибка при экспорте связей';
+          console.error('Export-links error', err);
+        }
+      });
+  }
+
+  /** Экспортирует AI-связи для всех локальных .md-документов. */
+  exportAllLinks(): void {
+    this.exportMessage = '';
+    this.knowledge
+      .exportLinks()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (res) => {
+          this.exportMessage = res.ok
+            ? `Экспорт завершён: файлов ${res.done ?? 0}, связей добавлено ${res.added ?? 0}, тегов записано ${res.tagsAdded ?? 0}.`
+            : 'Экспорт не выполнен';
+          this.loadConfirmedLinks();
+        },
+        error: (err) => {
+          this.exportMessage = err.error?.error || 'Ошибка при экспорте связей';
+          console.error('Export-links error', err);
+        }
+      });
+  }
+
   // ============================ Навигация по вкладкам ============================
 
   switchView(view: 'home' | 'docs' | 'graph' | 'settings'): void {
@@ -650,6 +717,111 @@ export class AppComponent implements OnInit, OnDestroy {
     this.diagramDoc = null;
     this.mermaid = null;
     this.diagramError = '';
+  }
+
+  /** Открывает модал с содержимым документа. */
+  openPreview(doc: DocumentInfo): void {
+    this.previewDoc = doc;
+    this.previewContent = null;
+    this.previewError = '';
+    this.isPreviewLoading = true;
+
+    this.knowledge
+      .getFileContent(doc.docId)
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.isPreviewLoading = false;
+        })
+      )
+      .subscribe({
+        next: (res) => {
+          this.previewContent = res;
+        },
+        error: (err) => {
+          this.previewError = err.error?.error || 'Ошибка при чтении файла';
+          console.error('File content error', err);
+        }
+      });
+  }
+
+  closePreview(): void {
+    this.previewDoc = null;
+    this.previewContent = null;
+    this.previewError = '';
+  }
+
+  /** Режим отображения в окне просмотра: форматированный или исходный текст. */
+  previewMode: 'readable' | 'raw' = 'readable';
+
+  setPreviewMode(mode: 'readable' | 'raw'): void {
+    this.previewMode = mode;
+  }
+
+  get previewHtml(): SafeHtml {
+    return this.formatDocument(this.previewContent?.content ?? '');
+  }
+
+  /**
+   * Форматирует документ для чтения: убирает frontmatter, превращает
+   * markdown-lite (заголовки, списки, цитаты, **жирный**, `код`, ```блоки```,
+   * [[wiki-ссылки]]) в безопасный HTML — HTML экранируется перед разметкой.
+   */
+  formatDocument(raw: string): SafeHtml {
+    // Убираем YAML frontmatter — для чтения он не нужен.
+    const text = (raw ?? '').replace(/^---\s*\r?\n[\s\S]*?\r?\n---\s*\r?\n?/, '');
+    const escaped = this.escapeHtml(text);
+    const parts = escaped.split('```');
+
+    // Внутстрочная разметка по уже экранированному тексту.
+    const inline = (s: string): string =>
+      s
+        .replace(/\[\[([^\]]+)\]\]/g, '<span class="wiki-link">[[$1]]</span>')
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/`([^`]+)`/g, '<code>$1</code>');
+
+    let html = '';
+    parts.forEach((part, i) => {
+      if (i % 2 === 1) {
+        html += `<pre class="code-block">${part.trim()}</pre>`;
+        return;
+      }
+      let inList = false;
+      const closeList = () => {
+        if (inList) {
+          html += '</ul>';
+          inList = false;
+        }
+      };
+      for (const line of part.split(/\r?\n/)) {
+        const h = /^(#{1,6})\s+(.*)$/.exec(line);
+        if (h) {
+          closeList();
+          const lvl = Math.min(h[1].length + 1, 6);
+          html += `<h${lvl}>${inline(h[2])}</h${lvl}>`;
+          continue;
+        }
+        const li = /^\s*[-*+]\s+(.*)$/.exec(line);
+        if (li) {
+          if (!inList) {
+            html += '<ul>';
+            inList = true;
+          }
+          html += `<li>${inline(li[1])}</li>`;
+          continue;
+        }
+        const q = /^&gt;\s?(.*)$/.exec(line);
+        if (q) {
+          closeList();
+          html += `<blockquote>${inline(q[1])}</blockquote>`;
+          continue;
+        }
+        closeList();
+        html += inline(line) + '<br>';
+      }
+      closeList();
+    });
+    return this.sanitizer.bypassSecurityTrustHtml(html);
   }
 
   /** Открывает Mermaid-код в отдельном окне. */
@@ -773,11 +945,11 @@ export class AppComponent implements OnInit, OnDestroy {
     const byId = new Map<string, DocumentInfo>();
     this.documents.forEach((d) => byId.set(d.docId, d));
     const nodeIds: string[] = [];
-    const edges: Array<{ a: string; b: string }> = [];
+    const edges: Array<{ a: string; b: string; wikiLink: boolean }> = [];
     this.graphLinks.forEach((l) => {
       if (!nodeIds.includes(l.sourceId)) nodeIds.push(l.sourceId);
       if (!nodeIds.includes(l.targetId)) nodeIds.push(l.targetId);
-      edges.push({ a: l.sourceId, b: l.targetId });
+      edges.push({ a: l.sourceId, b: l.targetId, wikiLink: l.type === 'wiki_link' });
     });
 
     const nodes: GraphNode[] = nodeIds.map((id, i) => {
@@ -836,18 +1008,20 @@ export class AppComponent implements OnInit, OnDestroy {
     }
 
     ctx.clearRect(0, 0, W, H);
-    // Рёбра
-    ctx.strokeStyle = '#94a3b8';
+    // Рёбра: AI-связи — серые, Obsidian [[wiki-ссылки]] — зелёные пунктирные.
     ctx.lineWidth = 1.5;
     edges.forEach((e) => {
       const A = nodes.find((n) => n.id === e.a);
       const B = nodes.find((n) => n.id === e.b);
       if (!A || !B) return;
+      ctx.setLineDash(e.wikiLink ? [5, 4] : []);
+      ctx.strokeStyle = e.wikiLink ? '#059669' : '#94a3b8';
       ctx.beginPath();
       ctx.moveTo(A.x, A.y);
       ctx.lineTo(B.x, B.y);
       ctx.stroke();
     });
+    ctx.setLineDash([]);
     // Узлы + подписи
     nodes.forEach((n) => {
       ctx.beginPath();

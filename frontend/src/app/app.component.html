@@ -88,7 +88,8 @@
         <datalist id="embModelsList">
           <option *ngFor="let m of activeEmbeddingModels" [value]="m"></option>
         </datalist>
-        <p class="hint">Используется для индексации и запросов.</p>
+        <p class="hint" *ngIf="!isYandex">Используется для индексации и запросов (OpenAI)。</p>
+        <p class="hint" *ngIf="isYandex">Модель для Yandex: `text-search-doc` / `text-search-query` (не OpenAI text-embedding-*）。</p>
       </div>
     </div>
 
@@ -213,6 +214,13 @@
         <span class="docs-count" *ngIf="documents.length">{{ documents.length }}</span>
       </div>
 
+      <div class="docs-toolbar">
+        <button class="btn-export" (click)="exportAllLinks()">
+          ⬇️ Экспортировать связи и теги в исходные файлы
+        </button>
+        <p class="message" *ngIf="exportMessage">{{ exportMessage }}</p>
+      </div>
+
       <p class="hint" *ngIf="!documents.length">
         Пока нет проиндексированных файлов. Загрузите файлы или отсканируйте папку.
       </p>
@@ -230,9 +238,18 @@
           </div>
           <div class="doc-cell doc-project">{{ doc.project }}</div>
           <div class="doc-cell doc-actions">
+            <button class="btn-preview" (click)="openPreview(doc)">👁 Просмотр</button>
             <button class="btn-links" (click)="findLinks(doc)">🔗 Связать</button>
             <button class="btn-tags" (click)="openTags(doc)">🏷️ Теги</button>
             <button class="btn-diagram" (click)="generateDiagramFor(doc)">📊 Схема</button>
+            <button
+              class="btn-export"
+              (click)="exportDoc(doc)"
+              title="Записать AI-связи и теги в файл в исходной папке"
+              *ngIf="doc.path"
+            >
+              ⬇️ Экспорт
+            </button>
           </div>
         </div>
       </div>
@@ -255,6 +272,14 @@
     <div class="graph-canvas-wrap" *ngIf="!isGraphLoading && graphLinks.length">
       <canvas id="graph-canvas" class="graph-canvas"></canvas>
       <p class="hint">Клик по узлу открывает его связи. Связи появляются после подтверждения в разделе «Документы».</p>
+      <div class="graph-legend">
+        <span class="legend-item">
+          <i class="legend-line legend-ai"></i> AI-связь
+        </span>
+        <span class="legend-item">
+          <i class="legend-line legend-wiki"></i> Obsidian [[ссылка]]
+        </span>
+      </div>
     </div>
   </div>
 
@@ -381,6 +406,54 @@
             </a>
             <button class="btn-secondary" (click)="openDiagramInWindow()">🖥️ Открыть в окне</button>
             <button class="btn-secondary" (click)="downloadMermaid()">⬇️ Скачать .mmd</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Модал: просмотр файла -->
+  <div class="modal-overlay" *ngIf="previewDoc" (click)="closePreview()">
+    <div class="modal modal-wide" (click)="$event.stopPropagation()">
+      <div class="modal-head">
+        <h2>👁 Просмотр «{{ previewDoc.fileName }}»</h2>
+        <button class="btn-close" (click)="closePreview()">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <div *ngIf="isPreviewLoading" class="links-loading">
+          <span class="spinner spinner-dark" aria-label="Загрузка"></span>
+          <span>Загружаем содержимое файла…</span>
+        </div>
+
+        <p class="links-error" *ngIf="previewError && !isPreviewLoading">{{ previewError }}</p>
+
+        <div class="preview-result" *ngIf="!isPreviewLoading && previewContent !== null">
+          <div class="preview-toolbar">
+            <p class="preview-meta">{{ previewMeta }}</p>
+            <div class="preview-modes">
+              <button
+                class="btn-mode"
+                [class.active]="previewMode === 'readable'"
+                (click)="setPreviewMode('readable')"
+              >
+                📖 Чтение
+              </button>
+              <button
+                class="btn-mode"
+                [class.active]="previewMode === 'raw'"
+                (click)="setPreviewMode('raw')"
+              >
+                📄 Исходный текст
+              </button>
+            </div>
+          </div>
+
+          <div class="doc-reading" *ngIf="previewMode === 'readable'" [innerHTML]="previewHtml"></div>
+          <pre class="code-block preview-block" *ngIf="previewMode === 'raw'">{{ previewContent.content }}</pre>
+
+          <div class="diagram-actions">
+            <button class="btn-secondary" (click)="exportDoc(previewDoc)">⬇️ Экспорт в этот файл</button>
           </div>
         </div>
       </div>
