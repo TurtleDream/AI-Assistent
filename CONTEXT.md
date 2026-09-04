@@ -12,6 +12,7 @@
 - Бэкенд нарезает на чанки → эмбеддинги → векторный поиск по косинусному сходству → ответ LLM с источниками.
 - AI-функции: предложение **связей** между документами и сохранение их истории, GPT-генерация **тегов** (persist в `tags`/`doc_tags`), генерация **Mermaid-диаграмм**.
 - **Obsidian-совместимость:** парсинг YAML Frontmatter (теги `tags`/`aliases` из `.md`), внутренние `[[wiki-ссылки]]` → связи типа `wiki_link` (сила 1.0), авто-переиндексация при изменении файлов (chokidar) и экспорт AI-связей обратно в `.md` (`<!-- AI Suggested: связан с [[File2]] (85%) -->`).
+- **Этап 4 — нативный плагин Obsidian (`obsidian-plugin/`):** тот же функционал внутри Obsidian без бэкенда — RAG-чат по Vault с кликабельными источниками, «Find connections», «Suggest tags» (вставка в frontmatter), «Generate diagram from selection» (Mermaid). Индекс хранится в `saveData()` плагина (JSON), эмбеддинги — OpenAI-совместимый fetch (без SDK), чанкинг и косинусное сходство перенесены из бэкенда без изменений.
 - Ключевая фича: деление по **проектам**, фильтр в UI + **работа с локальной файловой системой** (вместо ручного аплоада файлов).
 
 ## 2. Стек (строго соблюдать)
@@ -46,6 +47,20 @@
 │        ├─ app.component.ts/html/css (основной UI: навигация по вкладкам, все экраны)
 │        ├─ folder-tree.component.ts  (рекурсивное Obsidian-подобное дерево папок)
 │        ├─ knowledge.service.ts     (все API-методы + интерфейсы)
+├─ obsidian-plugin/ — нативный плагин Obsidian (Этап 4, TypeScript + esbuild)
+│  ├─ manifest.json     (id: knowledge-weaver-ai, isDesktopOnly: true)
+│  ├─ esbuild.config.mjs, tsconfig.json, package.json (build → main.js)
+│  ├─ styles.css, versions.json, README.md
+│  └─ src/
+│     ├─ main.ts              ← KnowledgeWeaverPlugin: команды, ribbon, контекстное меню, reindexVault()
+│     ├─ settings.ts          ← KnowledgeWeaverSettings + PluginSettingTab (ключ, baseUrl, модели, расширения, topK, порог)
+│     ├─ indexer.ts           ← VaultIndexer (скан Vault, инкремент по mtime), searchChunks()
+│     ├─ llm.ts               ← fetch-клиент embeddings/chat/completions (OpenAI-совместимый), ragAnswer(), extractJson()
+│     ├─ types.ts             ← PluginIndex {version, embeddingModel, files, chunks}, IndexChunk
+│     ├─ utils.ts             ← чанкинг (500 симв./20 строк), cosineSimilarity, чистка frontmatter/wiki-ссылок
+│     ├─ chat-modal.ts        ← RAG-чат Modal с кликабельными источниками
+│     ├─ connections-modal.ts ← «Find connections» для активного файла
+│     └─ ai-features.ts       ← TagsModal (frontmatter) + generateDiagramFromSelection (Mermaid)
 ```
 
 ## 4. Бэкенд — `backend/server.js`
@@ -171,8 +186,19 @@
 - Frontend: `cd frontend && npm install && npm start` (ng serve, порт 4200, CORS к 3000).
 - Сборка фронта: `npm run build` (ng build).
 - Проверка синтаксиса бэка: `node --check backend/server.js`.
+- **Плагин Obsidian:** `cd obsidian-plugin && npm install && npm run build` (tsc + esbuild → `main.js`); `npm run dev` — watch. Установка: скопировать `main.js`, `manifest.json`, `styles.css` в `<Vault>/.obsidian/plugins/knowledge-weaver-ai/`, включить в настройках Obsidian, задать API-ключ, выполнить команду «Reindex vault».
 
-## 7. Известные тонкости / грабли
+## 7. Плагин Obsidian — детали
+- **Команды:** `Open Knowledge Weaver` (палитра + ribbon ✨), `Reindex vault`, `Find connections for this note` (палитра, открывает модал со вставкой ссылок), `Suggest tags for this note` (ручной выбор), `Auto-tag this note` (авто-добавление тегов; палитра + контекстное меню «авто-теги»), `Generate diagram from selection` (нужно выделение).
+- **Хранение:** `saveData({ index, settings })` — единый JSON: `index = { version: 1, embeddingModel, files: { path → {mtime, chunks} }, chunks: [{path, idx, text, vector}] }`. Смена embedding-модели сбрасывает индекс (векторы разных моделей несравнимы).
+- **Индексация:** инкрементальная по `stat.mtime`; удалённые файлы выбрасываются; автосохранение каждые 25 файлов; батчи эмбеддингов по 8; прогресс в `Notice`.
+- **RAG:** вопрос → эмбеддинг → top-K чанков по косинусному сходству (dot, эмбеддинги нормализованы) → `ragAnswer` с системным промптом против галлюцинаций → ответ + кликабельные чипсы источников (открывают файл через `workspace.getLeaf("tab").openFile`).
+- **Теги:** `note-edits.ts` — `addTagsToFrontmatter()` идемпотентно создаёт/расширяет поле `tags` (создание frontmatter, перезапись `tags: [...]`, вставка при отсутствии). Ручной режим — `TagsModal` (чипы с выбором); авто-режим — `autoTagNote()` (LLM → JSON-массив → сразу в frontmatter, объединение с существующими).
+- **AI-ссылки:** в модале «Find connections» у каждой связи кнопка 🔗 и кнопка «Вставить все ссылки»; в конец заметки добавляется `<!-- AI Suggested: связан с [[Заметка]] (85%) -->` (формат как у экспорта в бэкенде), повторная вставка не дублируется (`addAiLink`/`addAiLinks`).
+- **Настройки:** провайдер (`openai` / `yandex`, при смене подставляются base URL и модели по умолчанию), apiKey (password), baseUrl, chatModel (`gpt-4o-mini` / `yandexgpt-lite`), embeddingModel (`text-embedding-3-small` / `text-search-doc`), yandexFolderId (виден только для Yandex, обязателен), extensions (`md, txt, js, py`), topK (1–15), minSimilarity (0–1), maxTags (1–10).
+- **YandexGPT:** отдельный адаптер в `llm.ts` (как в бэкенде) — `POST /foundationModels/v1/textEmbedding|completion`, авторизация `Authorization: Api-Key <ключ>` + заголовок `x-folder-id`, `modelUri: emb://|g://<folder>/<model>/latest`. Эмбеддинги — по одному тексту (батчей нет),/latest добавляется автоматически.
+
+## 8. Известные тонкости / грабли
 - **Yandex modelUri ОБЯЗАТЕЛЬНО с `/latest`** — иначе 404 `model_not_found`.
 - **Yandex baseURL** нельзя брать из OpenAI-формата; `yandexBase()` нормализует и обычно просто возвращает `https://llm.api.cloud.yandex.net`.
 - **Yandex гео-блокировка** (403 `unsupported_country_region_territory`) — со стороны провайдера, нужен VPN/поддерживаемый регион.
@@ -184,3 +210,4 @@
 - **Экспорт** работает только для `.md`-файлов из локального сканирования (есть `path`) и только для AI-связей; повторный экспорт идемпотентен (уже вставленные комментарии не дублируются).
 - **Yandex-эмбеддинги требуют свою модель:** если провайдер `yandex`, а embedding-модель осталась OpenAI (`text-embedding-3-small`) — Yandex возвращает `400 unknown model` → ошибки при индексации/скане. Используется отдельная `yandexEmbeddingModel` (`text-search-doc` по умолчанию; `YANDEX_EMBEDDING_MODEL` в `.env`); в UI поле embedding-модели автоматически маппится по провайдеру。
 - **LLM-конфиг хранится в памяти** — сбрасывается при рестарте бэкенда（для v0.1 допустимо**. **Записи（чанки）персистентны** — хранятся в SQLite `./db/knowledge.sqlite` и переживают рестарт; файл автогенерируется при старте.
+- **Плагин:** Web Workers для эмбеддингов не внедрены (fetch-вызовы асинхронны, UI почти не блокирует); если при 1000+ файлах индексация начнёт подтормаживать — вынести эмбеддинги в Worker. Эмбеддинги OpenAI нормализованы, поэтому в `searchChunks` используется dot-произведение (= косинус); для ненормализованных провайдеров заменить на `cosineSimilarity` из `utils.ts`.

@@ -306,3 +306,33 @@ __UI (`app.component.ts/html/css` + новый `folder-tree.component.ts`):__
 5. __Настройки__ — смена рабочей папки и очистка индекса БД (`DELETE /api/clear`) с подтверждением; конфигурация AI-моделей осталась в той же панели.
 
 ### Валидация
+
+
+## Что сделано (шаги 4.1–4.4)
+
+__4.1 Скелет__
+
+- `manifest.json` — id `knowledge-weaver-ai`, `minAppVersion 0.15.0`, `isDesktopOnly: true`
+- `src/main.ts` — класс `KnowledgeWeaverPlugin extends Plugin`: команда *Open Knowledge Weaver*, ribbon-иконка (✨), настройка через `PluginSettingTab`, 5 команд
+- `package.json` + `esbuild.config.mjs` + `tsconfig.json` — сборка в один `main.js`, скрипты `build`/`dev`
+
+__4.2 Индексация Vault__
+
+- `src/indexer.ts` — `app.vault.getFiles()` + фильтр по настраиваемым расширениям (по умолчанию `md, txt, js, py`), чтение через `vault.read`
+- `src/utils.ts` — чанкинг перенесён из бэкенда: текст 500 симв./перекрытие 50, код по 20 строкам; косинусное сходство; чистка frontmatter и `[[wiki-ссылок]]` перед эмбеддингом
+- Эмбеддинги — OpenAI-совместимый `fetch`-клиент (`src/llm.ts`, без тяжёлого SDK), батчи по 8; ключ хранится в настройках плагина
+- Инкрементальная переиндексация по mtime, смена embedding-модели сбрасывает индекс, автосохранение каждые 25 файлов через `saveData`, прогресс в `Notice`
+
+__4.3 AI-функции__
+
+- __RAG-чат__ (`src/chat-modal.ts`) — Modal с векторным поиском (top-K из настроек) и ответом LLM + __кликабельные источники-чипсы__, открывающие файл в Vault
+- __Find connections__ (`src/connections-modal.ts`) — по активному файлу, порог сходства настраивается, клик открывает заметку в новой вкладке
+- __Suggest tags__ (`src/ai-features.ts`) — модал с выбираемыми чипсами, добавление в существующий/новый YAML frontmatter
+- __Generate diagram from selection__ — выделенный текст → Mermaid, вставка блоком ```mermaid
+- Все функции — в палитре команд; теги и схема — ещё и в контекстном меню редактора
+
+__4.4 Полировка__
+
+- Расширенные настройки: API-ключ (password-поле), Base URL, chat/embedding-модели, расширения, top-K, порог, лимит тегов, кнопки «Переиндексировать всё» и «Очистить индекс», статус индекса
+- Понятные `Notice` для ошибок (401/403 → неверный ключ, 429, сеть, парсинг) через `describeError()`
+- `styles.css` в стиле Obsidian (CSS-переменные), `versions.json`, `README.md` с инструкцией по установке/релизу

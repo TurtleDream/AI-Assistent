@@ -1,0 +1,9 @@
+{
+  "id": "knowledge-weaver-ai",
+  "name": "Knowledge Weaver AI",
+  "version": "0.1.0",
+  "minAppVersion": "0.15.0",
+  "description": "AI-ассистент: RAG-чат по Vault, связи между заметками, теги и Mermaid-схемы.",
+  "author": "TurtleDream",
+  "isDesktopOnly": true
+}

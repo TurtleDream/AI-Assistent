@@ -1,0 +1,92 @@
+/* ---------- Knowledge Weaver AI ---------- */
+
+.kw-chat, .kw-modal {
+  padding: 8px;
+}
+
+.kw-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 1.1em;
+  margin-bottom: 12px;
+}
+
+.kw-icon { display: inline-flex; }
+.kw-icon .svg-icon { width: 20px; height: 20px; }
+
+/* Чат */
+.kw-chat-log {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 50vh;
+  overflow-y: auto;
+  margin-bottom: 12px;
+}
+
+.kw-msg { line-height: 1.5; }
+.kw-msg-role { font-weight: 600; }
+.kw-msg-user { color: var(--text-muted); }
+
+.kw-answer { margin-top: 4px; }
+.kw-answer pre { white-space: pre-wrap; }
+
+.kw-sources {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.kw-src-chip, .kw-tag-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  font-size: 0.85em;
+  cursor: pointer;
+}
+.kw-src-chip:hover { background: var(--background-modifier-hover); }
+
+.kw-tag-chip.kw-tag-selected {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+.kw-tag-chip.kw-tag-existing { opacity: 0.55; }
+
+.kw-input-row { display: flex; gap: 8px; }
+.kw-input-row textarea {
+  flex: 1;
+  min-height: 60px;
+  resize: vertical;
+}
+
+.kw-empty { color: var(--text-muted); padding: 12px 0; }
+.kw-error { color: var(--text-error); white-space: pre-wrap; }
+
+/* Списки (связи, теги) */
+.kw-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 55vh;
+  overflow-y: auto;
+  margin-bottom: 12px;
+}
+
+.kw-row { display: flex; align-items: center; gap: 8px; }
+.kw-row .kw-src-chip { flex: 1; }
+
+.kw-insert-btn {
+  padding: 2px 8px;
+  font-size: 0.9em;
+}
+.kw-insert-btn:disabled { opacity: 0.5; }
+
+.kw-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+.kw-spinner { color: var(--text-muted); font-style: italic; }
